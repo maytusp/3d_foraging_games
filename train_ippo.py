@@ -14,8 +14,8 @@ from torch.utils.tensorboard import SummaryWriter
 import supersuit as ss
 
 # Import the environment from the updated file
-from temporal_env_3d import PettingZooWrapper 
-from models.pickup_models import PPOLSTMCommAgent 
+from temporalg_3d import PettingZooWrapper 
+from models import PPOLSTMCommAgent 
 
 def extract_dict(obs_batch, device):
     """
@@ -34,7 +34,7 @@ class Args:
     env_id: str = "TemporalG-v1"
     total_timesteps: int = int(2e7) 
     learning_rate: float = 2.5e-4
-    num_envs: int = 16 
+    num_envs: int = 4
     num_steps: int = 128
     anneal_lr: bool = True
     gamma: float = 0.99
@@ -51,10 +51,9 @@ class Args:
     target_kl: float = None
     log_every = 10
     
-    n_words = 16
+    n_words = 4
     image_size = 96
-    grid_size = 5
-    
+
     batch_size: int = 0
     minibatch_size: int = 0
     num_iterations: int = 0
@@ -69,7 +68,7 @@ class Args:
     cuda: bool = True
     track: bool = False
     wandb_project_name: str = "pickup_high_v1"
-    wandb_entity: str = "user"
+    wandb_entity: str = "maytusp"
 
 if __name__ == "__main__":
     args = tyro.cli(Args)
@@ -102,7 +101,7 @@ if __name__ == "__main__":
     # concat_vec_envs_v1 results in a vector env of size (num_envs * num_agents)
     # Order is usually [Env0_Ag0, Env0_Ag1, Env1_Ag0, Env1_Ag1, ...]
     envs = ss.pettingzoo_env_to_vec_env_v1(env)
-    envs = ss.concat_vec_envs_v1(envs, args.num_envs, num_cpus=4, base_class="gymnasium")
+    envs = ss.concat_vec_envs_v1(envs, args.num_envs, num_cpus=12, base_class="gymnasium")
 
     # Recalculate batch sizes based on actual vectorized dimensions
     total_agents = envs.num_envs
@@ -112,12 +111,11 @@ if __name__ == "__main__":
 
     # -----------------
 
-    agent = PPOLSTMCommAgent(num_actions=4, 
-                                    grid_size=args.grid_size, 
-                                    n_words=args.n_words, 
-                                    embedding_size=16, 
-                                    num_channels=3, 
-                                    image_size=args.image_size).to(device)
+    agent = PPOLSTMCommAgent(num_actions=3, 
+                            n_words=args.n_words, 
+                            embedding_size=64, 
+                            num_channels=3, 
+                            image_size=args.image_size).to(device)
                                     
     optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
 

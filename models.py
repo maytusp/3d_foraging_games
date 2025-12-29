@@ -23,13 +23,7 @@ class PPOLSTMCommAgent(nn.Module):
     '''
     def __init__(self, num_actions=3, n_words=4, embedding_size=64, num_channels=3, image_size=96):
         super().__init__()
-        self.visual_encoder = EfficientNetEncoder() # Assumes output is (B, 1280)
-        self.visual_projector = nn.Sequential(
-            nn.Linear(1280, 128),
-            nn.ReLU()
-        )
         self.visual_dim = 128
-
         self.n_words = n_words
         self.embedding_size = embedding_size
         self.num_channels = num_channels
@@ -42,9 +36,12 @@ class PPOLSTMCommAgent(nn.Module):
         
 
         
-        # Preprocessing for EfficientNet (Normalize)
         self.normalize = T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-        # -------------------------------
+        self.visual_encoder = EfficientNetEncoder() # output is (B, 1280)
+        self.visual_projector = nn.Sequential(
+            nn.Linear(1280, self.visual_dim),
+            nn.ReLU()
+        )
 
         self.message_encoder = nn.Sequential(
             nn.Embedding(n_words, embedding_size),
@@ -77,7 +74,7 @@ class PPOLSTMCommAgent(nn.Module):
         x = image / 255.0
         # EfficientNet expects normalized data
         x = self.normalize(x)
-        image_feat = self.visual_project(self.visual_encoder(x))
+        image_feat = self.visual_projector(self.visual_encoder(x).flatten(start_dim=1))
 
         # Location Processing
         location_feat = self.location_encoder(location) # (Batch, loc_dim)

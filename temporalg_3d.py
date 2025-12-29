@@ -14,13 +14,13 @@ from gymnasium import spaces
 from pettingzoo.utils import ParallelEnv
 
 class TemporalGEnv:
-    def __init__(self, headless=False):
+    def __init__(self, headless=False, image_size=96):
         self.mode = p.DIRECT if headless else p.GUI
-        self.client = p.connect(self.mode)
-        p.setAdditionalSearchPath(pybullet_data.getDataPath())
+        self.headless = headless
+        # self.client = p.connect(self.mode)
+        self.client = None
         
         self.dt = 1./100.
-        p.setTimeStep(self.dt)
         self.ROBOT_SCALE = 0.6 
 
         self.FORWARD_DIST = 0.25
@@ -36,29 +36,52 @@ class TemporalGEnv:
         self.ARENA_WIDTH = 6
         self.ARENA_HEIGHT = 6
 
-        self.IMAGE_SIZE = 96
+        self.IMAGE_SIZE = image_size
 
         # --- NEW CONSTANTS FOR COMMUNICATION ---
         self.COMM_DIST_LIMIT = 2      # Meters
         self.COMM_MAX_STEPS = 5        # Steps allowed after first contact
         
-        # --- LOAD ASSETS ONCE ---
+        self.agent0 = None
+        self.agent1 = None
+        self.door_id = None
+        self.middle_wall_ids = []
+
+    def _setup_pybullet(self):
+        """Initialise PyBullet"""
+        self.mode = p.DIRECT if self.headless else p.GUI
+        self.client = p.connect(self.mode)
+        
+        p.setAdditionalSearchPath(pybullet_data.getDataPath())
+        p.setTimeStep(self.dt)
         p.setGravity(0, 0, -9.8)
+        
+        # Load Static Assets
         p.loadURDF("plane.urdf")
         self._create_arena_boundary(self.ARENA_WIDTH, self.ARENA_HEIGHT)
         
+        # Load Agents
         self.agent0 = self._load_r2d2_asset([0, -2, -5])
         self.agent1 = self._load_r2d2_asset([0, 2, -5])
         self.agents = [self.agent0, self.agent1]
         
+        # Load Items
         self.item_red = self._create_sphere_item([0,0,-5], [1,0,0,1])
         self.item_blue = self._create_sphere_item([0,0,-5], [0,0,1,1])
         self.items = [self.item_red, self.item_blue]
-        
-        self.door_id = None 
-        self.middle_wall_ids = [] 
-        
+
     def reset(self):
+        reconnect = False
+        if self.client is None:
+            reconnect = True
+        else:
+            try:
+                p.getConnectionInfo(self.client)
+            except:
+                reconnect = True
+        
+        if reconnect:
+            self._setup_pybullet()
         # Clean up old door AND old middle walls
         if self.door_id is not None:
             p.removeBody(self.door_id)
@@ -165,7 +188,7 @@ class TemporalGEnv:
         # 2. Check "First Met" Trigger
         if dist <= self.COMM_DIST_LIMIT and not self.has_met:
             self.has_met = True
-            print(f">>> [Step {self.step_count}] Agents First Met! Timer Started.")
+            # print(f">>> [Step {self.step_count}] Agents First Met! Timer Started.")
 
         # 3. Update Timer (ticks only if they have met at least once)
         if self.has_met:
@@ -250,7 +273,7 @@ class TemporalGEnv:
         self.distractor_idx = 1 - self.target_idx
         self.spawn_time_target, self.spawn_time_distractor = times
         self.target_spawned = self.distractor_spawned = False
-        print(f"Goal: {'RED' if self.target_idx == 0 else 'BLUE'}")
+        # print(f"Goal: {'RED' if self.target_idx == 0 else 'BLUE'}")
 
     def _check_spawns(self):
         if self.step_count == self.spawn_time_target and not self.target_spawned:
@@ -323,9 +346,10 @@ class TemporalGEnv:
 class PettingZooWrapper(ParallelEnv):
     metadata = {"render_modes": ["human"], "name": "3d_temporalg_v1"}
 
-    def __init__(self, headless=True):
+    def __init__(self, headless=True, image_size=96):
+        self.render_mode = None if headless else "human"
         self.possible_agents = ["agent_0", "agent_1"]
-        self.env = TemporalGEnv(headless=headless)
+        self.env = TemporalGEnv(headless=headless, image_size=image_size)
         
         # Simple Actions: Move Forward, Turn Left, Turn Right
         self.action_space_map = {agent: spaces.Discrete(3) for agent in self.possible_agents}
@@ -376,7 +400,15 @@ class PettingZooWrapper(ParallelEnv):
         
         return observations, infos
 
+
     def step(self, actions):
+        if isinstance(actions, dict):
+            # Map agent names to their actions strictly in order
+            actions = [actions[a] for a in self.possible_agents]
+        elif isinstance(actions, list) or isinstance(actions, np.ndarray):
+            pass
+        else:
+            raise TypeError(f"Expected dict or list actions, got {type(actions)}")
         img_obs, loc_obs, reward, done, status, comm_mask = self.env.step(actions)
         self.comm_mask = comm_mask
 
