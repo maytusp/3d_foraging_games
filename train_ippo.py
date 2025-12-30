@@ -34,8 +34,8 @@ class Args:
     env_id: str = "TemporalG-v1"
     total_timesteps: int = int(1e9) 
     learning_rate: float = 2.5e-4
-    num_envs: int = 32
-    num_steps: int = 32
+    num_envs: int = 8
+    num_steps: int = 128
     anneal_lr: bool = True
     gamma: float = 0.99
     gae_lambda: float = 0.95
@@ -93,7 +93,7 @@ if __name__ == "__main__":
 
     # --- ENV SETUP ---
     def make_env():
-        return PettingZooWrapper(headless=True, image_size=args.image_size)
+        return PettingZooWrapper(headless=True, image_size=args.image_size, max_steps=args.max_steps)
 
     # 1. Create Base Env
     env = make_env()

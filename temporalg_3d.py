@@ -225,7 +225,7 @@ class TemporalGEnv:
                         self.door_id = None
                         # Check first met based on a wall disappearing
                         self.has_met = True
-                        print(f">>> [Step {self.step_count}] Agents First Met")
+                        # print(f">>> [Step {self.step_count}] Agents First Met")
                         break
 
         for agent_id in self.agents:
@@ -355,10 +355,10 @@ class TemporalGEnv:
 class PettingZooWrapper(ParallelEnv):
     metadata = {"render_modes": ["human"], "name": "3d_temporalg_v1"}
 
-    def __init__(self, headless=True, image_size=96):
+    def __init__(self, headless=True, image_size=96, max_steps=32):
         self.render_mode = None if headless else "human"
         self.possible_agents = ["agent_0", "agent_1"]
-        self.env = TemporalGEnv(headless=headless, image_size=image_size)
+        self.env = TemporalGEnv(headless=headless, image_size=image_size, max_steps=max_steps)
         
         # Simple Actions: Move Forward, Turn Left, Turn Right
         self.action_space_map = {agent: spaces.Discrete(3) for agent in self.possible_agents}
