@@ -10,6 +10,8 @@ import gymnasium as gym
 from gymnasium import spaces
 from pettingzoo.utils import ParallelEnv
 
+import pkgutil
+
 class TemporalGEnv:
     def __init__(self, headless=False, image_size=96, max_steps=32):
         self.mode = p.DIRECT if headless else p.GUI
@@ -18,19 +20,19 @@ class TemporalGEnv:
         # self.client = p.connect(self.mode)
         self.client = None
         
-        self.dt = 1./30.
+        self.dt = 1./30.  # Faster physics tick
+        self.ACTION_DURATION = 0.1 # Slightly longer action
         self.ROBOT_SCALE = 0.6 
 
         self.FORWARD_DIST = 0.5
         self.TARGET_ANGLE = 45
-        self.ACTION_DURATION = 0.1 
         self.LIN_SPEED = self.FORWARD_DIST / self.ACTION_DURATION
         self.ANG_SPEED = math.radians(self.TARGET_ANGLE) / self.ACTION_DURATION
         self.STEPS_PER_ACTION = int(self.ACTION_DURATION / self.dt)
 
         self.FREEZE_STEPS = 6
         self.TARGET_SIZE = 0.3
-        self.COLLECT_DIST = 0.8
+        self.COLLECT_DIST = 0.5
         self.ARENA_WIDTH = 4
         self.ARENA_HEIGHT = 4
 
@@ -49,7 +51,22 @@ class TemporalGEnv:
         """Initialise PyBullet"""
         self.mode = p.DIRECT if self.headless else p.GUI
         self.client = p.connect(self.mode)
-        
+
+        # if self.headless:
+        #     try:
+        #         egl = pkgutil.get_loader('eglRenderer')
+        #         if egl:
+        #             plugin_id = p.loadPlugin(egl.get_filename(), "_eglRendererPlugin")
+        #         else:
+        #             plugin_id = p.loadPlugin("eglRendererPlugin")
+                
+        #         if plugin_id >= 0:
+        #             print(f"GPU Renderer Loaded (ID: {plugin_id})")
+        #         else:
+        #             print("GPU Renderer Failed to Load (Using CPU fallback)")
+        #     except Exception as e:
+        #         print(f"EGL Load Error: {e}")
+
         p.setAdditionalSearchPath(pybullet_data.getDataPath())
         p.setTimeStep(self.dt)
         p.setGravity(0, 0, -9.8)
@@ -241,17 +258,24 @@ class TemporalGEnv:
         d_target = self._get_dists(self.items[self.target_idx])
         d_distractor = self._get_dists(self.items[self.distractor_idx])
         
-        reward, done, status = 0, False, ""
-        if d_target[0] < self.COLLECT_DIST and d_target[1] < self.COLLECT_DIST:
-            reward = 1.0; done = True; status = "SUCCESS"
-        elif d_distractor[0] < self.COLLECT_DIST and d_distractor[1] < self.COLLECT_DIST:
-            reward = 0.1; done = True; status = "DISTRACTOR"
+        reward, done, status = 0.0, False, ""
 
-        if self.step_count >= self.max_steps:
+        # TERMINAL REWARD
+        if d_target[0] < self.COLLECT_DIST and d_target[1] < self.COLLECT_DIST:
+            reward += 1.0; done = True; status = "SUCCESS"
+        # TERMINAL PARTIAL REWARD
+        elif self.step_count >= self.max_steps:
             done = True
-            reward = -1.0
-            if status == "":
-                status = "TIMEOUT"
+            status = "TIMEOUT"
+            
+            ZONE_OUTER = 1.5
+            ZONE_INNER = 1.0
+            
+            # Agent 0 Score
+            if d_target[0] < ZONE_INNER and d_target[1] < ZONE_INNER:
+                reward += 0.20
+            elif d_target[0] < ZONE_OUTER and d_target[1] < ZONE_OUTER:
+                reward += 0.10
 
         # Note: Added comm_mask to return values
         return img_obs, loc_obs, reward, done, status, comm_mask
@@ -386,7 +410,8 @@ class TemporalGEnv:
                             proj, 
                             shadow=0, # NO SHADOWS
                             lightDirection=[0,0,1], # Simple lighting
-                            renderer=p.ER_TINY_RENDERER
+                            # renderer=p.ER_BULLET_HARDWARE_OPENGL, # GPU
+                            renderer=p.ER_TINY_RENDERER, # CPU
                         )
 
             rgb_arr = np.array(rgb, dtype=np.uint8).reshape(self.IMAGE_SIZE, self.IMAGE_SIZE, 4)
@@ -450,6 +475,10 @@ class PettingZooWrapper(ParallelEnv):
         
         self.agents = self.possible_agents[:]
         self.comm_mask = self.env.comm_mask
+
+        self.episode_return = {a: 0.0 for a in self.agents}
+        self.episode_length = {a: 0 for a in self.agents}
+        
         observations = self._process_obs(img_obs, loc_obs)
         infos = {agent: {} for agent in self.agents}
         
@@ -468,10 +497,27 @@ class PettingZooWrapper(ParallelEnv):
         self.comm_mask = comm_mask
 
         observations = self._process_obs(img_obs, loc_obs)
-        rewards = {agent: reward for agent in self.agents}
-        terminations = {agent: done for agent in self.agents}
-        truncations = {agent: False for agent in self.agents}
-        infos = {agent: {"status": status} for agent in self.agents}
+        rewards = {}
+        terminations = {}
+        truncations = {}
+        infos = {}
+
+        for i, agent in enumerate(self.agents):
+            # Accumulate stats
+            self.episode_return[agent] += reward
+            self.episode_length[agent] += 1
+            
+            rewards[agent] = reward
+            terminations[agent] = done
+            truncations[agent] = False 
+            
+            infos[agent] = {"status": status}
+            
+            if done:
+                infos[agent]["episode"] = {
+                    "r": self.episode_return[agent],
+                    "l": self.episode_length[agent]
+                }
         
         return observations, rewards, terminations, truncations, infos
 

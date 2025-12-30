@@ -32,7 +32,7 @@ def extract_dict(obs_batch, device):
 class Args:
     seed: int = 1
     env_id: str = "TemporalG-v1"
-    total_timesteps: int = int(1e9) 
+    total_timesteps: int = int(2e8) 
     learning_rate: float = 2.5e-4
     num_envs: int = 16
     num_steps: int = 128
@@ -80,7 +80,12 @@ if __name__ == "__main__":
     run_name = args.exp_name
     if args.track:
         import wandb
-        wandb.init(project=args.wandb_project_name, entity=args.wandb_entity, config=vars(args), name=run_name, monitor_gym=True, save_code=True)
+        wandb.init(project=args.wandb_project_name,
+        entity=args.wandb_entity, config=vars(args), 
+        name=run_name, 
+        monitor_gym=True, 
+        save_code=True,
+        sync_tensorboard=True,)
     
     writer = SummaryWriter(f"runs/{run_name}")
 
@@ -230,6 +235,8 @@ if __name__ == "__main__":
                     running_num_ep += 1
 
             if args.visualize_loss and running_num_ep != 0 and (global_step // total_agents) % args.log_every == 0:
+                # print(f"avg reward {running_ep_r / running_num_ep}")
+                # print(f"avg l { running_ep_l / running_num_ep}")
                 writer.add_scalar("charts/episodic_return", running_ep_r / running_num_ep, global_step)
                 writer.add_scalar("charts/episodic_length", running_ep_l / running_num_ep, global_step)
                 running_ep_r = 0.0
