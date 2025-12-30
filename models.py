@@ -3,6 +3,7 @@ import torch.nn as nn
 import torchvision.transforms as T
 
 import numpy as np
+import os
 from typing import Callable
 
 from torch.distributions.categorical import Categorical
@@ -132,7 +133,7 @@ class EfficientNetEncoder(nn.Module):
     '''
     Use pretrained EfficientNetEncoder from NoMaD navigation model
     '''
-    def __init__(self, model_name='efficientnet-b0', pretrained_path=None, image_size=(96,96)):
+    def __init__(self, model_name='efficientnet-b0', pretrained_path="checkpoints/visual_encoder/pretrained_nomad.pth", image_size=(96,96)):
         super().__init__()
         
         # 1. Initialize Base Structure

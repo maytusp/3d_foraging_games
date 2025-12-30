@@ -1,6 +1,3 @@
-#TODO Add location as observation
-#TODO Add PettingZoo Wrapper
-
 import pybullet as p
 import pybullet_data
 import time
@@ -14,7 +11,7 @@ from gymnasium import spaces
 from pettingzoo.utils import ParallelEnv
 
 class TemporalGEnv:
-    def __init__(self, headless=False, image_size=96, max_steps=128):
+    def __init__(self, headless=False, image_size=96, max_steps=32):
         self.mode = p.DIRECT if headless else p.GUI
         self.headless = headless
         self.max_steps = max_steps  # Store the limit
@@ -24,8 +21,8 @@ class TemporalGEnv:
         self.dt = 1./100.
         self.ROBOT_SCALE = 0.6 
 
-        self.FORWARD_DIST = 0.25
-        self.TARGET_ANGLE = 20
+        self.FORWARD_DIST = 0.5
+        self.TARGET_ANGLE = 45
         self.ACTION_DURATION = 0.1 
         self.LIN_SPEED = self.FORWARD_DIST / self.ACTION_DURATION
         self.ANG_SPEED = math.radians(self.TARGET_ANGLE) / self.ACTION_DURATION
@@ -33,14 +30,14 @@ class TemporalGEnv:
 
         self.FREEZE_STEPS = 6
         self.TARGET_SIZE = 0.3
-        self.COLLECT_DIST = 0.5
-        self.ARENA_WIDTH = 6
-        self.ARENA_HEIGHT = 6
+        self.COLLECT_DIST = 0.8
+        self.ARENA_WIDTH = 4
+        self.ARENA_HEIGHT = 4
 
         self.IMAGE_SIZE = image_size
 
         # --- NEW CONSTANTS FOR COMMUNICATION ---
-        self.COMM_DIST_LIMIT = 2      # Meters
+        self.COMM_DIST_LIMIT = 1      # Meters
         self.COMM_MAX_STEPS = 5        # Steps allowed after first contact
         
         self.agent0 = None
@@ -96,10 +93,10 @@ class TemporalGEnv:
         self._create_random_door_and_walls(self.ARENA_WIDTH)
 
         # Teleport Agents
-        rand_x0, rand_y0 = random.uniform(-2.3, 2.3), random.uniform(-2.3, -1.2)
+        rand_x0, rand_y0 = random.uniform(-1.2, 1.2), random.uniform(-1.8, -0.8)
         self._teleport_agent(self.agent0, [rand_x0, rand_y0], yaw=1.57)
         
-        rand_x1, rand_y1 = random.uniform(-2.3, 2.3), random.uniform(1.2, 2.3)
+        rand_x1, rand_y1 = random.uniform(-1.2, 1.2), random.uniform(1.8, 0.8)
         self._teleport_agent(self.agent1, [rand_x1, rand_y1], yaw=-1.57)
 
         # Reset Items
@@ -136,7 +133,7 @@ class TemporalGEnv:
         '''
         Easiest Scenario is the long middle wall is a door that can disappear after being hit by agents
         '''
-        door_w = 6.0
+        door_w = self.ARENA_WIDTH
         door_x = 0
         door_half = [door_w/2, self.wall_thickness/2, self.wall_height/2]
         self.door_id = p.createMultiBody(0, p.createCollisionShape(p.GEOM_BOX, halfExtents=door_half), 
@@ -186,12 +183,14 @@ class TemporalGEnv:
         pos1, _ = p.getBasePositionAndOrientation(self.agent1)
         dist = math.sqrt((pos0[0] - pos1[0])**2 + (pos0[1] - pos1[1])**2)
         
-        # 2. Check "First Met" Trigger
-        if dist <= self.COMM_DIST_LIMIT and not self.has_met:
-            self.has_met = True
-            # print(f">>> [Step {self.step_count}] Agents First Met! Timer Started.")
+        #TODO Remove this: Check First Met based on distance
+        # if dist <= self.COMM_DIST_LIMIT and not self.has_met:
+        #     self.has_met = True
+        #     # print(f">>> [Step {self.step_count}] Agents First Met")
 
-        # 3. Update Timer (ticks only if they have met at least once)
+
+
+        # Update Timer (ticks only if they have met at least once)
         if self.has_met:
             self.comm_timer += 1
 
@@ -224,6 +223,9 @@ class TemporalGEnv:
                     if contacts:
                         p.removeBody(self.door_id)
                         self.door_id = None
+                        # Check first met based on a wall disappearing
+                        self.has_met = True
+                        print(f">>> [Step {self.step_count}] Agents First Met")
                         break
 
         for agent_id in self.agents:

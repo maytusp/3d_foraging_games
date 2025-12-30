@@ -32,10 +32,10 @@ def extract_dict(obs_batch, device):
 class Args:
     seed: int = 1
     env_id: str = "TemporalG-v1"
-    total_timesteps: int = int(2e7) 
+    total_timesteps: int = int(1e9) 
     learning_rate: float = 2.5e-4
-    num_envs: int = 8
-    num_steps: int = 128
+    num_envs: int = 32
+    num_steps: int = 32
     anneal_lr: bool = True
     gamma: float = 0.99
     gae_lambda: float = 0.95
@@ -53,6 +53,7 @@ class Args:
     
     n_words = 4
     image_size = 96
+    max_steps = 32
 
     batch_size: int = 0
     minibatch_size: int = 0
@@ -63,11 +64,11 @@ class Args:
     load_pretrained = False
     visualize_loss = True
     save_frequency = int(1e5)
-    exp_name = f"temporal_3d_seed{seed}"
+    exp_name = f"ippo_ms{max_steps}_seed{seed}"
     torch_deterministic: bool = True
     cuda: bool = True
     track: bool = True
-    wandb_project_name: str = "pickup_high_v1"
+    wandb_project_name: str = "temporalg_3d_v1"
     wandb_entity: str = "maytusp"
 
 if __name__ == "__main__":
