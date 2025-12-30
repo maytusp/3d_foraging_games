@@ -34,7 +34,7 @@ class Args:
     env_id: str = "TemporalG-v1"
     total_timesteps: int = int(1e9) 
     learning_rate: float = 2.5e-4
-    num_envs: int = 8
+    num_envs: int = 16
     num_steps: int = 128
     anneal_lr: bool = True
     gamma: float = 0.99
@@ -52,7 +52,7 @@ class Args:
     log_every = 10
     
     n_words = 4
-    image_size = 96
+    image_size = 48
     max_steps = 32
 
     batch_size: int = 0
