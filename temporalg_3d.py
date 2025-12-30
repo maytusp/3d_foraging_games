@@ -14,9 +14,10 @@ from gymnasium import spaces
 from pettingzoo.utils import ParallelEnv
 
 class TemporalGEnv:
-    def __init__(self, headless=False, image_size=96):
+    def __init__(self, headless=False, image_size=96, max_steps=128):
         self.mode = p.DIRECT if headless else p.GUI
         self.headless = headless
+        self.max_steps = max_steps  # Store the limit
         # self.client = p.connect(self.mode)
         self.client = None
         
@@ -243,6 +244,12 @@ class TemporalGEnv:
             reward = 1.0; done = True; status = "SUCCESS"
         elif d_distractor[0] < self.COLLECT_DIST and d_distractor[1] < self.COLLECT_DIST:
             reward = 0.1; done = True; status = "DISTRACTOR"
+
+        if self.step_count >= self.max_steps:
+            done = True
+            reward = -1.0
+            if status == "":
+                status = "TIMEOUT"
 
         # Note: Added comm_mask to return values
         return img_obs, loc_obs, reward, done, status, comm_mask

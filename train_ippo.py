@@ -34,7 +34,7 @@ class Args:
     env_id: str = "TemporalG-v1"
     total_timesteps: int = int(2e7) 
     learning_rate: float = 2.5e-4
-    num_envs: int = 4
+    num_envs: int = 8
     num_steps: int = 128
     anneal_lr: bool = True
     gamma: float = 0.99
@@ -66,7 +66,7 @@ class Args:
     exp_name = f"temporal_3d_seed{seed}"
     torch_deterministic: bool = True
     cuda: bool = True
-    track: bool = False
+    track: bool = True
     wandb_project_name: str = "pickup_high_v1"
     wandb_entity: str = "maytusp"
 
@@ -289,38 +289,64 @@ if __name__ == "__main__":
                 
                 action_logratio = new_action_logprob - b_action_logprobs[mb_inds]
                 action_ratio = action_logratio.exp()
+
                 message_logratio = new_message_logprob - b_message_logprobs[mb_inds]
                 message_ratio = message_logratio.exp()
-                
+
                 mb_advantages = b_advantages[mb_inds]
                 if args.norm_adv:
                     mb_advantages = (mb_advantages - mb_advantages.mean()) / (mb_advantages.std() + 1e-8)
 
-                pg_loss = torch.max(
-                    -mb_advantages * action_ratio,
-                    -mb_advantages * torch.clamp(action_ratio, 1 - args.clip_coef, 1 + args.clip_coef)
-                ).mean()
-                
-                mg_loss = torch.max(
-                    -mb_advantages * message_ratio,
-                    -mb_advantages * torch.clamp(message_ratio, 1 - args.clip_coef, 1 + args.clip_coef)
-                ).mean()
+                # Policy loss
+                pg_loss1 = -mb_advantages * action_ratio
+                pg_loss2 = -mb_advantages * torch.clamp(action_ratio, 1 - args.clip_coef, 1 + args.clip_coef)
+                pg_loss = torch.max(pg_loss1, pg_loss2).mean()
 
+                # Message loss
+                mg_loss1 = -mb_advantages * message_ratio
+                mg_loss2 = -mb_advantages * torch.clamp(message_ratio, 1 - args.clip_coef, 1 + args.clip_coef)
+                mg_loss = torch.max(mg_loss1, mg_loss2).mean()
+
+                # Value loss
                 newvalue = newvalue.view(-1)
                 if args.clip_vloss:
                     v_loss_unclipped = (newvalue - b_returns[mb_inds]) ** 2
-                    v_clipped = b_values[mb_inds] + torch.clamp(newvalue - b_values[mb_inds], -args.clip_coef, args.clip_coef)
-                    v_loss_max = torch.max(v_loss_unclipped, (v_clipped - b_returns[mb_inds]) ** 2)
+                    v_clipped = b_values[mb_inds] + torch.clamp(
+                        newvalue - b_values[mb_inds],
+                        -args.clip_coef,
+                        args.clip_coef,
+                    )
+                    v_loss_clipped = (v_clipped - b_returns[mb_inds]) ** 2
+                    v_loss_max = torch.max(v_loss_unclipped, v_loss_clipped)
                     v_loss = 0.5 * v_loss_max.mean()
                 else:
                     v_loss = 0.5 * ((newvalue - b_returns[mb_inds]) ** 2).mean()
 
-                loss = pg_loss + mg_loss - (args.ent_coef * action_entropy.mean()) - (args.m_ent_coef * message_entropy.mean()) + v_loss * args.vf_coef
+                action_entropy_loss = action_entropy.mean()
+                message_entropy_loss = message_entropy.mean()
+                loss = pg_loss + mg_loss - (args.ent_coef * action_entropy_loss) - (args.m_ent_coef * message_entropy_loss) + v_loss * args.vf_coef
+
 
                 optimizer.zero_grad()
                 loss.backward()
                 nn.utils.clip_grad_norm_(agent.parameters(), args.max_grad_norm)
                 optimizer.step()
 
+
+        if args.visualize_loss and (global_step // args.num_envs) % args.log_every == 0:
+            SPS =  int(global_step / (time.time() - start_time))
+            # TRY NOT TO MODIFY: record rewards for plotting purposes
+            writer.add_scalar("charts/learning_rate", optimizer.param_groups[0]["lr"], global_step)
+            writer.add_scalar("losses/value_loss", v_loss.item(), global_step)
+            writer.add_scalar("losses/action_loss", pg_loss.item(), global_step)
+            writer.add_scalar("losses/message_loss", mg_loss.item(), global_step)
+            writer.add_scalar("losses/action_entropy", action_entropy_loss.item(), global_step)
+            writer.add_scalar("losses/message_entropy", message_entropy_loss.item(), global_step)
+            writer.add_scalar("charts/SPS", SPS, global_step)
+            print(f"SPS: {SPS}")
+
+    final_save_path = os.path.join(args.save_dir, "final_model.pt")
+    torch.save(agent.state_dict(), final_save_path)
+    print(f"Final model saved to {final_save_path}")
     envs.close()
     writer.close()
