@@ -18,7 +18,7 @@ class TemporalGEnv:
         # self.client = p.connect(self.mode)
         self.client = None
         
-        self.dt = 1./100.
+        self.dt = 1./30.
         self.ROBOT_SCALE = 0.6 
 
         self.FORWARD_DIST = 0.5
@@ -59,8 +59,8 @@ class TemporalGEnv:
         self._create_arena_boundary(self.ARENA_WIDTH, self.ARENA_HEIGHT)
         
         # Load Agents
-        self.agent0 = self._load_r2d2_asset([0, -2, -5])
-        self.agent1 = self._load_r2d2_asset([0, 2, -5])
+        self.agent0 = self._load_faced_agent([0, -2, -5], [0, 1, 1, 1]) 
+        self.agent1 = self._load_faced_agent([0, 2, -5], [1, 0, 1, 1])
         self.agents = [self.agent0, self.agent1]
         
         # Load Items
@@ -290,13 +290,50 @@ class TemporalGEnv:
         if self.step_count == self.spawn_time_distractor and not self.distractor_spawned:
             self._pop_item_up(self.items[self.distractor_idx]); self.distractor_spawned = True
 
-    def _load_r2d2_asset(self, pos):
-        start_orn = p.getQuaternionFromEuler([0, 0, 0])
-        agent_id = p.loadURDF("r2d2.urdf", pos, start_orn, globalScaling=self.ROBOT_SCALE)
-        for j in range(p.getNumJoints(agent_id)):
-            p.changeDynamics(agent_id, j, lateralFriction=0.0, spinningFriction=0.0)
-        p.changeDynamics(agent_id, -1, lateralFriction=0.0, spinningFriction=0.0)
+    def _load_faced_agent(self, pos, eye_color):
+        """
+        Creates a single Physics Body with a 'Face'.
+        Base: Grey Box (Collidable)
+        Link: Colored 'Eye' Box (Visual only, Fixed to Base)
+        """
+        # 1. Main Body Params
+        body_half = [0.2, 0.2, 0.3] 
+        base_col = p.createCollisionShape(p.GEOM_BOX, halfExtents=body_half)
+        base_vis = p.createVisualShape(p.GEOM_BOX, halfExtents=body_half, rgbaColor=[0.2, 0.2, 0.2, 1])
+
+        # 2. Eye Params (The front face)
+        # Sits slightly in front (y=0.2) and up
+        eye_half = [0.15, 0.02, 0.1] 
+        eye_vis = p.createVisualShape(p.GEOM_BOX, halfExtents=eye_half, rgbaColor=eye_color)
+
+        # 3. Create One MultiBody
+        # Note: We set linkCollisionShapeIndices to -1 so the eye does not affect physics
+        agent_id = p.createMultiBody(
+            baseMass=100,
+            baseCollisionShapeIndex=base_col,
+            baseVisualShapeIndex=base_vis,
+            basePosition=pos,
+            
+            linkMasses=[0.01],
+            linkCollisionShapeIndices=[-1], # No collision for eye
+            linkVisualShapeIndices=[eye_vis],
+            linkPositions=[[0, 0.22, 0.15]], # 0.2 (body) + 0.02 (eye) = 0.22 forward
+            linkOrientations=[[0,0,0,1]],
+            linkInertialFramePositions=[[0,0,0]],
+            linkInertialFrameOrientations=[[0,0,0,1]],
+            linkParentIndices=[0],
+            linkJointTypes=[p.JOINT_FIXED],
+            linkJointAxis=[[0,0,0]]
+        )
         return agent_id
+
+    # def _load_r2d2_asset(self, pos):
+    #     start_orn = p.getQuaternionFromEuler([0, 0, 0])
+    #     agent_id = p.loadURDF("r2d2.urdf", pos, start_orn, globalScaling=self.ROBOT_SCALE)
+    #     for j in range(p.getNumJoints(agent_id)):
+    #         p.changeDynamics(agent_id, j, lateralFriction=0.0, spinningFriction=0.0)
+    #     p.changeDynamics(agent_id, -1, lateralFriction=0.0, spinningFriction=0.0)
+    #     return agent_id
     
     def _teleport_agent(self, agent_id, pos, yaw):
         new_pos = [pos[0], pos[1], 0.1]
@@ -342,10 +379,19 @@ class TemporalGEnv:
             
             view = p.computeViewMatrix(cam_eye, cam_target, [0,0,1])
             proj = p.computeProjectionMatrixFOV(60, 1.0, 0.1, 10.0)
-            _, _, rgb, _, _ = p.getCameraImage(self.IMAGE_SIZE, self.IMAGE_SIZE, view, proj, renderer=p.ER_TINY_RENDERER)
+            _, _, rgb, _, _ = p.getCameraImage(
+                            self.IMAGE_SIZE, 
+                            self.IMAGE_SIZE, 
+                            view, 
+                            proj, 
+                            shadow=0, # NO SHADOWS
+                            lightDirection=[0,0,1], # Simple lighting
+                            renderer=p.ER_TINY_RENDERER
+                        )
+
+            rgb_arr = np.array(rgb, dtype=np.uint8).reshape(self.IMAGE_SIZE, self.IMAGE_SIZE, 4)
+            rgb_img = rgb_arr[:, :, :3] # Drop Alpha, keep RGB. No cv2 conversion needed if PyBullet returns RGB.
             
-            # Helper: Resize here if you need 224x224 immediately, otherwise keep 256
-            rgb_img = cv2.cvtColor(np.array(rgb, dtype=np.uint8).reshape(self.IMAGE_SIZE, self.IMAGE_SIZE, 4)[:, :, :3], cv2.COLOR_RGB2BGR)
             img_obs.append(rgb_img)
         # print(f"agent 0 is at (x,y,dx,dy) = {loc_obs[0]}")
         # print(f"agent 1 is at (x,y,dx,dy) = {loc_obs[1]}")
@@ -355,7 +401,7 @@ class TemporalGEnv:
 class PettingZooWrapper(ParallelEnv):
     metadata = {"render_modes": ["human"], "name": "3d_temporalg_v1"}
 
-    def __init__(self, headless=True, image_size=96, max_steps=32):
+    def __init__(self, headless=True, image_size=46, max_steps=32):
         self.render_mode = None if headless else "human"
         self.possible_agents = ["agent_0", "agent_1"]
         self.env = TemporalGEnv(headless=headless, image_size=image_size, max_steps=max_steps)
@@ -546,8 +592,14 @@ if __name__ == "__main__":
                 print("COMM BLOCKED (Too far)")
             # ---------------------------
 
-            # Show Views
-            cv2.imshow("Views (Agent 0 | Agent 1)", np.hstack((vis0, vis1)))
+
+            # SWAP RGB -> BGR for OpenCV
+            vis0_bgr = cv2.cvtColor(vis0, cv2.COLOR_RGB2BGR)
+            vis1_bgr = cv2.cvtColor(vis1, cv2.COLOR_RGB2BGR)
+
+
+        
+            cv2.imshow("Views (Agent 0 | Agent 1)", np.hstack((vis0_bgr, vis1_bgr)))
             
             # Check Done (Any agent done = episode done in this wrapper)
             if any(terms.values()) or any(truncs.values()):
