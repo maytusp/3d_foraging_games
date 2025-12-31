@@ -30,7 +30,7 @@ def extract_dict(obs_batch, device):
 
 @dataclass
 class Args:
-    seed: int = 1
+    seed: int = 3
     env_id: str = "TemporalG-v1"
     total_timesteps: int = int(2e8) 
     learning_rate: float = 2.5e-4
@@ -68,7 +68,7 @@ class Args:
     torch_deterministic: bool = True
     cuda: bool = True
     track: bool = True
-    wandb_project_name: str = "temporalg_3d_v1"
+    wandb_project_name: str = "temporalg_3d_distractor_reward"
     wandb_entity: str = "maytusp"
 
 if __name__ == "__main__":

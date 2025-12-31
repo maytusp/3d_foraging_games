@@ -262,7 +262,9 @@ class TemporalGEnv:
 
         # TERMINAL REWARD
         if d_target[0] < self.COLLECT_DIST and d_target[1] < self.COLLECT_DIST:
-            reward += 1.0; done = True; status = "SUCCESS"
+            reward = 1.0; done = True; status = "SUCCESS"
+        elif d_distractor[0] < self.COLLECT_DIST and d_distractor[1] < self.COLLECT_DIST:
+            reward = 0.3; done = True; status = "DISTRACTOR"
         # TERMINAL PARTIAL REWARD
         elif self.step_count >= self.max_steps:
             done = True
@@ -273,9 +275,9 @@ class TemporalGEnv:
             
             # Agent 0 Score
             if d_target[0] < ZONE_INNER and d_target[1] < ZONE_INNER:
-                reward += 0.20
+                reward = 0.20
             elif d_target[0] < ZONE_OUTER and d_target[1] < ZONE_OUTER:
-                reward += 0.10
+                reward = 0.10
 
         # Note: Added comm_mask to return values
         return img_obs, loc_obs, reward, done, status, comm_mask
