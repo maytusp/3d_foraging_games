@@ -14,6 +14,7 @@ import pkgutil
 
 class TemporalGEnv:
     def __init__(self, headless=False, image_size=96, max_steps=32):
+        self.distractor_reward = False # The reward is for initialize navigation behaviour to go to object
         self.mode = p.DIRECT if headless else p.GUI
         self.headless = headless
         self.max_steps = max_steps  # Store the limit
@@ -224,6 +225,42 @@ class TemporalGEnv:
             
         return self.comm_mask
 
+    def render_global(self):
+        """
+        Renders a 3rd person 'God View' of the arena.
+        """
+        # 1. Camera Position: High up (z=4), looking down at center (0,0,0)
+        # You can adjust pitch/yaw/distance to change the angle
+        view_matrix = p.computeViewMatrixFromYawPitchRoll(
+            cameraTargetPosition=[0, 0, 0],
+            distance=5.0,
+            yaw=0,
+            pitch=-90,  # -90 is Top-Down, -60 is Isometric
+            roll=0,
+            upAxisIndex=2
+        )
+        
+        # 2. Projection Matrix (Field of View)
+        proj_matrix = p.computeProjectionMatrixFOV(
+            fov=60, aspect=1.0, nearVal=0.1, farVal=100.0
+        )
+        
+        # 3. Render
+        # We use a higher resolution (e.g., 480x480) for the video than the agent sees
+        width, height = 480, 480
+        _, _, px, _, _ = p.getCameraImage(
+            width=width, 
+            height=height, 
+            viewMatrix=view_matrix, 
+            projectionMatrix=proj_matrix,
+            renderer=p.ER_TINY_RENDERER # Works on CPU/Headless
+        )
+        
+        # 4. Process Image (RGBA -> RGB)
+        rgb_array = np.array(px, dtype=np.uint8).reshape(height, width, 4)
+        rgb_array = rgb_array[:, :, :3] # Drop Alpha channel
+        return rgb_array
+
     def step(self, actions):
         if self.step_count < self.FREEZE_STEPS:
             actions = [0, 0]
@@ -263,7 +300,7 @@ class TemporalGEnv:
         # TERMINAL REWARD
         if d_target[0] < self.COLLECT_DIST and d_target[1] < self.COLLECT_DIST:
             reward = 1.0; done = True; status = "SUCCESS"
-        elif d_distractor[0] < self.COLLECT_DIST and d_distractor[1] < self.COLLECT_DIST:
+        elif self.distractor_reward and d_distractor[0] < self.COLLECT_DIST and d_distractor[1] < self.COLLECT_DIST:
             reward = 0.3; done = True; status = "DISTRACTOR"
         # TERMINAL PARTIAL REWARD
         elif self.step_count >= self.max_steps:
@@ -485,6 +522,9 @@ class PettingZooWrapper(ParallelEnv):
         infos = {agent: {} for agent in self.agents}
         
         return observations, infos
+
+    def render(self):
+        return self.env.render_global()
 
 
     def step(self, actions):

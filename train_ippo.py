@@ -32,7 +32,7 @@ def extract_dict(obs_batch, device):
 class Args:
     seed: int = 3
     env_id: str = "TemporalG-v1"
-    total_timesteps: int = int(2e8) 
+    total_timesteps: int = int(1e9) 
     learning_rate: float = 2.5e-4
     num_envs: int = 16
     num_steps: int = 128
@@ -63,12 +63,12 @@ class Args:
     os.makedirs(save_dir, exist_ok=True)
     load_pretrained = False
     visualize_loss = True
-    save_frequency = int(1e5)
+    save_frequency = int(1e6)
     exp_name = f"ippo_ms{max_steps}_seed{seed}"
     torch_deterministic: bool = True
     cuda: bool = True
     track: bool = True
-    wandb_project_name: str = "temporalg_3d_distractor_reward"
+    wandb_project_name: str = "temporalg_3d_freeze_encoder"
     wandb_entity: str = "maytusp"
 
 if __name__ == "__main__":
