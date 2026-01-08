@@ -164,10 +164,12 @@ class EfficientNetEncoder(nn.Module):
             print(f"Weights loaded. Missing keys: {len(missing)}, Unexpected keys: {len(unexpected)}")
         else:
             print("No pretrained path provided or file not found. Using random init.")
+
         if not train_visual_encoder:
             print("Freeze Visual Encoder Parameters")
             for param in self.base_model.parameters():
                 param.requires_grad = False
+        
     def forward(self, x):
         x = self.base_model.extract_features(x) # get encoding of this img 
         x = self.base_model._avg_pooling(x) # avg pooling 

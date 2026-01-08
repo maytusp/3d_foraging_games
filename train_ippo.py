@@ -53,12 +53,12 @@ class Args:
     
     n_words = 4
     image_size = 48
-    max_steps = 32
+    max_steps = 64
 
     batch_size: int = 0
     minibatch_size: int = 0
     num_iterations: int = 0
-    
+    pretrained_path = "./checkpoints/temporal_3d/pretrained_nav/model_step_201600000.pt"
     save_dir = f"checkpoints/temporal_3d/seed{seed}/"
     os.makedirs(save_dir, exist_ok=True)
     load_pretrained = False
@@ -68,7 +68,7 @@ class Args:
     torch_deterministic: bool = True
     cuda: bool = True
     track: bool = True
-    wandb_project_name: str = "temporalg_3d_freeze_encoder"
+    wandb_project_name: str = "temporalg_3d_pt_dist_ft_no_dist"
     wandb_entity: str = "maytusp"
 
 if __name__ == "__main__":
@@ -122,7 +122,10 @@ if __name__ == "__main__":
                             embedding_size=64, 
                             num_channels=3, 
                             image_size=args.image_size).to(device)
-                                    
+    if args.pretrained_path:
+        print(f"Loading model from {args.pretrained_path}...")
+        agent.load_state_dict(torch.load(args.pretrained_path, map_location=device))
+
     optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
 
     # Storage setup
