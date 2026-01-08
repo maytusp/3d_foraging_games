@@ -2,3 +2,4 @@ logs/
 runs/
 checkpoints/
 wandb/
+test_videos
