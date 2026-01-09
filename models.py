@@ -22,8 +22,9 @@ class PPOLSTMCommAgent(nn.Module):
     Agent with communication
     Observations: [image, location, message]
     '''
-    def __init__(self, num_actions=3, n_words=4, embedding_size=64, num_channels=3, image_size=96):
+    def __init__(self, num_actions=3, n_words=4, embedding_size=64, num_channels=3, image_size=96, max_duration=12):
         super().__init__()
+        self.max_duration = max_duration # maximum spawn durations: initial training is 6 but we can extend to 12
         self.visual_dim = 128
         self.n_words = n_words
         self.embedding_size = embedding_size
@@ -45,7 +46,7 @@ class PPOLSTMCommAgent(nn.Module):
         )
 
         self.message_encoder = nn.Sequential(
-            nn.Embedding(n_words, embedding_size),
+            nn.Embedding(n_words+1, embedding_size), # +1 means it includes silence token that is not produced by the model
             nn.Linear(embedding_size, embedding_size), 
             nn.ReLU(),
         )
@@ -65,6 +66,9 @@ class PPOLSTMCommAgent(nn.Module):
         self.critic = layer_init(nn.Linear(self.hidden_dim, 1), std=1)
         self.message_head = layer_init(nn.Linear(self.hidden_dim, n_words), std=0.01)
 
+        self.mask_head = layer_init(nn.Linear(self.hidden_dim, 2), std=0.01)
+        self.time_head = layer_init(nn.Linear(self.hidden_dim, self.max_duration), std=0.01)
+        
     def get_states(self, input, lstm_state, done, tracks=None):
         batch_size = lstm_state[0].shape[1]
         image, location, message = input
@@ -124,9 +128,31 @@ class PPOLSTMCommAgent(nn.Module):
         message_probs = Categorical(logits=message_logits)
         
         if message is None:
-            message = message_probs.sample()
+            # Inference
+            # Shift message to [1, n_words]
+            raw_message_idx = message_probs.sample()
+            message = raw_message_idx + 1
+        else:
+            # Training
+            # Shift message back to [0, n_words-1]
+            raw_message_idx = (message - 1).clamp(min=0)
 
-        return action, action_probs.log_prob(action), action_probs.entropy(), message, message_probs.log_prob(message), message_probs.entropy(), self.critic(hidden), lstm_state
+        mask_logits = self.mask_head(hidden)
+        time_logits = self.time_head(hidden)
+
+        return (
+            action, 
+            action_probs.log_prob(action), 
+            action_probs.entropy(), 
+            message, 
+            message_probs.log_prob(raw_message_idx), 
+            message_probs.entropy(), 
+            self.critic(hidden), 
+            mask_logits,
+            time_logits,
+            lstm_state
+        )
+        
 
 
 class EfficientNetEncoder(nn.Module):

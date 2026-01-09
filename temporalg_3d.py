@@ -15,6 +15,7 @@ import pkgutil
 class TemporalGEnv:
     def __init__(self, headless=False, image_size=96, max_steps=32):
         self.distractor_reward = False # The reward is for initialize navigation behaviour to go to object
+        self.partial_reward = False
         self.mode = p.DIRECT if headless else p.GUI
         self.headless = headless
         self.max_steps = max_steps  # Store the limit
@@ -33,15 +34,13 @@ class TemporalGEnv:
 
         self.FREEZE_STEPS = 6
         self.TARGET_SIZE = 0.3
-        self.COLLECT_DIST = 0.5
+        self.COLLECT_DIST = 1.0
         self.ARENA_WIDTH = 4
         self.ARENA_HEIGHT = 4
 
         self.IMAGE_SIZE = image_size
 
-        # --- NEW CONSTANTS FOR COMMUNICATION ---
-        self.COMM_DIST_LIMIT = 1      # Meters
-        self.COMM_MAX_STEPS = 5        # Steps allowed after first contact
+        self.COMM_MAX_STEPS = 5        # Message length
         
         self.agent0 = None
         self.agent1 = None
@@ -83,8 +82,10 @@ class TemporalGEnv:
         
         # Load Items
         self.item_red = self._create_sphere_item([0,0,-5], [1,0,0,1])
-        self.item_blue = self._create_sphere_item([0,0,-5], [0,0,1,1])
+        self.item_blue = self._create_sphere_item([0,0,-5], [1,0,0,1])
         self.items = [self.item_red, self.item_blue]
+
+
 
     def reset(self):
         reconnect = False
@@ -196,26 +197,13 @@ class TemporalGEnv:
     #         self.middle_wall_ids.append(wall_id)
 
     def _update_communication_logic(self):
-        # 1. Calculate Distance
         pos0, _ = p.getBasePositionAndOrientation(self.agent0)
         pos1, _ = p.getBasePositionAndOrientation(self.agent1)
         dist = math.sqrt((pos0[0] - pos1[0])**2 + (pos0[1] - pos1[1])**2)
         
-        #TODO Remove this: Check First Met based on distance
-        # if dist <= self.COMM_DIST_LIMIT and not self.has_met:
-        #     self.has_met = True
-        #     # print(f">>> [Step {self.step_count}] Agents First Met")
-
-
-
-        # Update Timer (ticks only if they have met at least once)
         if self.has_met:
             self.comm_timer += 1
 
-        # 4. Determine Mask
-        # Condition A: Must be close NOW
-        # Condition B: Must have time remaining on the clock
-        is_close_now = (dist <= self.COMM_DIST_LIMIT)
         time_remaining = (self.comm_timer <= self.COMM_MAX_STEPS) # inclusive or exclusive depending on preference
         
         if self.has_met and time_remaining:
@@ -277,9 +265,7 @@ class TemporalGEnv:
                     if contacts:
                         p.removeBody(self.door_id)
                         self.door_id = None
-                        # Check first met based on a wall disappearing
                         self.has_met = True
-                        # print(f">>> [Step {self.step_count}] Agents First Met")
                         break
 
         for agent_id in self.agents:
@@ -290,7 +276,7 @@ class TemporalGEnv:
         # --- UPDATE COMMUNICATION MASK ---
         comm_mask = self._update_communication_logic()
 
-        img_obs, loc_obs = self._get_obs()
+        img_obs, loc_obs, time_obs = self._get_obs()
         
         d_target = self._get_dists(self.items[self.target_idx])
         d_distractor = self._get_dists(self.items[self.distractor_idx])
@@ -303,7 +289,7 @@ class TemporalGEnv:
         elif self.distractor_reward and d_distractor[0] < self.COLLECT_DIST and d_distractor[1] < self.COLLECT_DIST:
             reward = 0.3; done = True; status = "DISTRACTOR"
         # TERMINAL PARTIAL REWARD
-        elif self.step_count >= self.max_steps:
+        elif self.partial_reward and self.step_count >= self.max_steps:
             done = True
             status = "TIMEOUT"
             
@@ -317,7 +303,7 @@ class TemporalGEnv:
                 reward = 0.10
 
         # Note: Added comm_mask to return values
-        return img_obs, loc_obs, reward, done, status, comm_mask
+        return img_obs, loc_obs, time_obs, reward, done, status, comm_mask
 
     def _apply_velocity_momentarily(self, agent_id, action):
         lin_v = self.LIN_SPEED if action == 1 else 0
@@ -345,8 +331,23 @@ class TemporalGEnv:
         self.distractor_idx = 1 - self.target_idx
         self.spawn_time_target, self.spawn_time_distractor = times
         self.target_spawned = self.distractor_spawned = False
-        # print(f"Goal: {'RED' if self.target_idx == 0 else 'BLUE'}")
 
+    def _get_time_labels(self):
+        """
+        Returns a list [time_for_agent_0, time_for_agent_1]
+        Logic: Item 0 is always in front of Agent 0. Item 1 is always in front of Agent 1.
+        """
+        # If Item 0 is the target, Agent 0 gets target time.
+        if self.target_idx == 0:
+            t0 = self.spawn_time_target
+            t1 = self.spawn_time_distractor
+        # If Item 1 is the target (Item 0 is distractor), Agent 0 gets distractor time.
+        else:
+            t0 = self.spawn_time_distractor
+            t1 = self.spawn_time_target
+            
+        return [t0, t1]
+        
     def _check_spawns(self):
         if self.step_count == self.spawn_time_target and not self.target_spawned:
             self._pop_item_up(self.items[self.target_idx]); self.target_spawned = True  
@@ -390,13 +391,6 @@ class TemporalGEnv:
         )
         return agent_id
 
-    # def _load_r2d2_asset(self, pos):
-    #     start_orn = p.getQuaternionFromEuler([0, 0, 0])
-    #     agent_id = p.loadURDF("r2d2.urdf", pos, start_orn, globalScaling=self.ROBOT_SCALE)
-    #     for j in range(p.getNumJoints(agent_id)):
-    #         p.changeDynamics(agent_id, j, lateralFriction=0.0, spinningFriction=0.0)
-    #     p.changeDynamics(agent_id, -1, lateralFriction=0.0, spinningFriction=0.0)
-    #     return agent_id
     
     def _teleport_agent(self, agent_id, pos, yaw):
         new_pos = [pos[0], pos[1], 0.1]
@@ -423,7 +417,7 @@ class TemporalGEnv:
     def _get_obs(self):
         img_obs = []
         loc_obs = []
-        
+        time_labels = self._get_time_labels()
         for agent_id, agent in enumerate(self.agents):
             pos, orn = p.getBasePositionAndOrientation(agent)
             r = np.array(p.getMatrixFromQuaternion(orn)).reshape(3,3)
@@ -459,7 +453,7 @@ class TemporalGEnv:
             img_obs.append(rgb_img)
         # print(f"agent 0 is at (x,y,dx,dy) = {loc_obs[0]}")
         # print(f"agent 1 is at (x,y,dx,dy) = {loc_obs[1]}")
-        return img_obs, loc_obs
+        return img_obs, loc_obs, time_labels
 
 
 class PettingZooWrapper(ParallelEnv):
@@ -469,14 +463,15 @@ class PettingZooWrapper(ParallelEnv):
         self.render_mode = None if headless else "human"
         self.possible_agents = ["agent_0", "agent_1"]
         self.env = TemporalGEnv(headless=headless, image_size=image_size, max_steps=max_steps)
-        
+        self.FREEZE_STEPS = self.env.FREEZE_STEPS
         # Simple Actions: Move Forward, Turn Left, Turn Right
         self.action_space_map = {agent: spaces.Discrete(3) for agent in self.possible_agents}
         self.observation_space_map = {
             agent: spaces.Dict({
                 "image": spaces.Box(low=0, high=255, shape=(3, self.env.IMAGE_SIZE, self.env.IMAGE_SIZE), dtype=np.uint8),
                 "location": spaces.Box(low=-np.inf, high=np.inf, shape=(4,), dtype=np.float32),
-                "mask": spaces.Box(low=0, high=1, shape=(1,), dtype=np.int32)
+                "mask": spaces.Box(low=0, high=1, shape=(1,), dtype=np.int32),
+                "time": spaces.Box(low=1, high=self.FREEZE_STEPS, shape=(1,), dtype=np.int32)
             }) for agent in self.possible_agents
         }
         
@@ -490,7 +485,7 @@ class PettingZooWrapper(ParallelEnv):
     def action_space(self):
         return lambda agent: self.action_space_map[agent]
 
-    def _process_obs(self, img_obs_list, loc_obs_list):
+    def _process_obs(self, img_obs_list, loc_obs_list, time_obs_list):
         observations = {}
         for i, agent in enumerate(self.agents):
             raw_img = img_obs_list[i]
@@ -501,6 +496,7 @@ class PettingZooWrapper(ParallelEnv):
                 "image": image_tensor,
                 "location": loc_obs_list[i],
                 "mask": np.array([self.comm_mask], dtype=np.int32),
+                "time": np.array([time_obs_list[i]], dtype=np.int32) 
             }
         return observations
 
@@ -509,8 +505,7 @@ class PettingZooWrapper(ParallelEnv):
             random.seed(seed)
             np.random.seed(seed)
         
-        # Env reset returns (img_obs, loc_obs)
-        img_obs, loc_obs = self.env.reset()
+        img_obs, loc_obs, time_obs = self.env.reset()
         
         self.agents = self.possible_agents[:]
         self.comm_mask = self.env.comm_mask
@@ -518,7 +513,7 @@ class PettingZooWrapper(ParallelEnv):
         self.episode_return = {a: 0.0 for a in self.agents}
         self.episode_length = {a: 0 for a in self.agents}
         
-        observations = self._process_obs(img_obs, loc_obs)
+        observations = self._process_obs(img_obs, loc_obs, time_obs)
         infos = {agent: {} for agent in self.agents}
         
         return observations, infos
@@ -535,10 +530,10 @@ class PettingZooWrapper(ParallelEnv):
             pass
         else:
             raise TypeError(f"Expected dict or list actions, got {type(actions)}")
-        img_obs, loc_obs, reward, done, status, comm_mask = self.env.step(actions)
+        img_obs, loc_obs, time_obs, reward, done, status, comm_mask = self.env.step(actions)
         self.comm_mask = comm_mask
 
-        observations = self._process_obs(img_obs, loc_obs)
+        observations = self._process_obs(img_obs, loc_obs, time_obs)
         rewards = {}
         terminations = {}
         truncations = {}
@@ -562,58 +557,6 @@ class PettingZooWrapper(ParallelEnv):
                 }
         
         return observations, rewards, terminations, truncations, infos
-
-# if __name__ == "__main__":
-#     env = TemporalGEnv(headless=False)
-#     env.reset()
-    
-#     print("------------------------------------------------")
-#     print("Controls: Arrows (Agent 0), I/J/L (Agent 1)")
-#     print("R: Reset | ESC: Quit")
-#     print("------------------------------------------------")
-
-#     while True:
-#         keys = p.getKeyboardEvents()
-#         a0, a1, step_triggered = 0, 0, False
-        
-#         def is_active(k):
-#             return k in keys and (keys[k] & p.KEY_IS_DOWN or keys[k] & p.KEY_WAS_TRIGGERED)
-
-#         if is_active(p.B3G_UP_ARROW): a0 = 1; step_triggered = True
-#         if is_active(p.B3G_LEFT_ARROW): a0 = 2; step_triggered = True
-#         if is_active(p.B3G_RIGHT_ARROW): a0 = 3; step_triggered = True
-        
-#         if is_active(ord('i')): a1 = 1; step_triggered = True
-#         if is_active(ord('j')): a1 = 2; step_triggered = True
-#         if is_active(ord('l')): a1 = 3; step_triggered = True
-        
-#         if is_active(ord('r')): 
-#             env.reset()
-#             step_triggered = False
-        
-#         if is_active(27): 
-#             break
-        
-#         if step_triggered:
-#             img_obs, loc_obs, reward, done, status, comm_mask = env.step([a0, a1])
-            
-#             # --- DEBUG VISUALIZATION ---
-#             # Print status to console so you can verify logic
-#             if comm_mask:
-#                 print(f"COMM ACTIVE | Steps left: {env.COMM_MAX_STEPS - env.comm_timer}")
-#             elif env.has_met and env.comm_timer > env.COMM_MAX_STEPS:
-#                 print("COMM EXPIRED (Time up)")
-#             elif not env.has_met:
-#                 print("COMM INACTIVE (Haven't met)")
-#             else:
-#                 print("COMM BLOCKED (Too far)")
-#             # ---------------------------
-
-#             cv2.imshow("Views", np.hstack((img_obs[0], img_obs[1])))
-#             if done:
-#                 print(f">>> {status}"); cv2.waitKey(1500); env.reset()
-        
-#         cv2.waitKey(1)
 
 
 if __name__ == "__main__":

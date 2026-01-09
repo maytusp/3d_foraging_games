@@ -1,6 +1,0 @@
-Job is using 1 GPU(s) with ID(s) 0 and 12 CPU core(s)
-/var/spool/slurmd/job10486580/slurm_script: line 19: activate: No such file or directory
-Traceback (most recent call last):
-  File "/net/scratch/n70579mp/3d_foraging_games/train_ippo.py", line 8, in <module>
-    import torch
-ModuleNotFoundError: No module named 'torch'

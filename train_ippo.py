@@ -26,15 +26,17 @@ def extract_dict(obs_batch, device):
     obs = torch.tensor(obs_batch['image']).to(device).float()
     locs = torch.tensor(obs_batch['location']).to(device).float()
     masks = torch.tensor(obs_batch['mask']).to(device).squeeze(-1)
-    return obs, locs, masks
+    times = torch.tensor(obs_batch['time']).to(device).squeeze(-1).long()
+        
+    return obs, locs, masks, times
 
 @dataclass
 class Args:
-    seed: int = 3
+    seed: int = 1
     env_id: str = "TemporalG-v1"
     total_timesteps: int = int(1e9) 
     learning_rate: float = 2.5e-4
-    num_envs: int = 16
+    num_envs: int = 4
     num_steps: int = 128
     anneal_lr: bool = True
     gamma: float = 0.99
@@ -47,28 +49,32 @@ class Args:
     ent_coef: float = 0.01
     m_ent_coef: float = 0.002
     vf_coef: float = 0.5
+    mask_coef: float = 0.2
+    time_coef: float = 0.2
     max_grad_norm: float = 0.5
     target_kl: float = None
     log_every = 10
     
     n_words = 4
     image_size = 48
-    max_steps = 64
+    max_steps = 32
+    mask_message_grad: bool = True
 
     batch_size: int = 0
     minibatch_size: int = 0
     num_iterations: int = 0
-    pretrained_path = "./checkpoints/temporal_3d/pretrained_nav/model_step_201600000.pt"
-    save_dir = f"checkpoints/temporal_3d/seed{seed}/"
+    pretrained_path = None # "./checkpoints/pretrained_nav/model_step_201600000.pt"
+    exp_name = f"ippo_ms{max_steps}_aux_mask_time_seed{seed}"
+    save_dir = f"checkpoints/train_from_scratch/{exp_name}/seed{seed}/"
     os.makedirs(save_dir, exist_ok=True)
     load_pretrained = False
     visualize_loss = True
     save_frequency = int(1e6)
-    exp_name = f"ippo_ms{max_steps}_seed{seed}"
+    
     torch_deterministic: bool = True
     cuda: bool = True
     track: bool = True
-    wandb_project_name: str = "temporalg_3d_pt_dist_ft_no_dist"
+    wandb_project_name: str = "temporalg_3d_silence_token"
     wandb_entity: str = "maytusp"
 
 if __name__ == "__main__":
@@ -139,6 +145,8 @@ if __name__ == "__main__":
     s_messages = torch.zeros((args.num_steps, total_agents), dtype=torch.int64).to(device)
     
     masks_store = torch.zeros((args.num_steps, total_agents), dtype=torch.int64).to(device)
+    times_store = torch.zeros((args.num_steps, total_agents), dtype=torch.int64).to(device)
+
     actions = torch.zeros((args.num_steps, total_agents)).to(device)
     action_logprobs = torch.zeros((args.num_steps, total_agents)).to(device)
     message_logprobs = torch.zeros((args.num_steps, total_agents)).to(device)
@@ -151,7 +159,7 @@ if __name__ == "__main__":
     
     # --- RESET ---
     next_obs_dict, _ = envs.reset(seed=args.seed)
-    next_obs, next_locs, next_masks = extract_dict(next_obs_dict, device)
+    next_obs, next_locs, next_masks, next_times = extract_dict(next_obs_dict, device)
     
     # Initialize "Last Received Message" buffer (t=0, silence)
     next_r_messages = torch.zeros(total_agents, dtype=torch.int64).to(device)
@@ -178,13 +186,14 @@ if __name__ == "__main__":
             obs[step] = next_obs
             raw_locs[step] = next_locs
             masks_store[step] = next_masks
+            times_store[step] = next_times
             r_messages[step] = next_r_messages # Input for this step
             dones[step] = next_done
 
             # 1. Agent Forward Pass
             # We pass 'next_r_messages' which was calculated at the end of the PREVIOUS step
             with torch.no_grad():
-                action, action_logprob, _, s_message, message_logprob, _, value, next_lstm_state = agent.get_action_and_value(
+                action, action_logprob, _, s_message, message_logprob, _, value, _, _, next_lstm_state = agent.get_action_and_value(
                     (next_obs, next_locs, next_r_messages), 
                     next_lstm_state, 
                     next_done
@@ -201,31 +210,16 @@ if __name__ == "__main__":
             next_obs_dict, reward, terminations, truncations, infos = envs.step(env_action)
             
             # Extract next observation
-            next_obs, next_locs, next_masks = extract_dict(next_obs_dict, device)
+            next_obs, next_locs, next_masks, next_times = extract_dict(next_obs_dict, device)
             
             next_done_np = np.logical_or(terminations, truncations)
             rewards[step] = torch.tensor(reward).to(device).view(-1)
             next_done = torch.Tensor(next_done_np).to(device)
 
-            # --- 3. MESSAGE EXCHANGE LOGIC (Crucial Part) ---
-            # We must calculate what Agent A hears at t+1 based on what Agent B sent at t.
-            # Batch layout: [Env0_A0, Env0_A1, Env1_A0, Env1_A1, ...]
-            # We reshape to (Num_Envs, 2) to identify pairs.
-            
-            # Reshape Sent Messages
+            #  MESSAGE EXCHANGE LOGIC
             s_msgs_reshaped = s_message.view(-1, 2)  # Shape: (Num_Envs, 2)
-            
-            # Swap: Agent 0 hears 1, Agent 1 hears 0
-            # Flip along dim 1
             swapped_msgs = torch.flip(s_msgs_reshaped, dims=[1]).flatten() # Shape: (Total_Agents,)
-            
-            # Apply Mask:
-            # next_masks is the mask for the current physical state (after stepping).
-            # If mask is 0, communication is blocked.
             next_r_messages = swapped_msgs * next_masks
-            
-            # Note: next_r_messages is now ready for the START of the next loop iteration.
-            # ------------------------------------------------
 
             if (global_step // total_agents) % args.save_frequency == 0:
                 save_path = os.path.join(args.save_dir, f"model_step_{global_step}.pt")
@@ -279,6 +273,9 @@ if __name__ == "__main__":
         b_returns = returns.reshape(-1)
         b_values = values.reshape(-1)
 
+        b_masks = masks_store.reshape(-1)
+        b_times = times_store.reshape(-1)
+
         envsperbatch = total_agents // args.num_minibatches
         envinds = np.arange(total_agents)
         flatinds = np.arange(args.batch_size).reshape(args.num_steps, total_agents)
@@ -289,14 +286,15 @@ if __name__ == "__main__":
                 end = start + envsperbatch
                 mbenvinds = envinds[start:end]
                 mb_inds = flatinds[:, mbenvinds].ravel()
-
-                _, new_action_logprob, action_entropy, _, new_message_logprob, message_entropy, newvalue, _ = agent.get_action_and_value(
-                    (b_obs[mb_inds], b_locs[mb_inds], b_r_messages[mb_inds]),
-                    (initial_lstm_state[0][:, mbenvinds], initial_lstm_state[1][:, mbenvinds]),
-                    b_dones[mb_inds],
-                    b_actions.long()[mb_inds],
-                    b_s_messages.long()[mb_inds],
-                )
+                mb_masks = b_masks[mb_inds]
+                mb_times = b_times[mb_inds]
+                _, new_action_logprob, action_entropy, _, new_message_logprob, message_entropy, newvalue, mask_logits, time_logits, _ = agent.get_action_and_value(
+                                    (b_obs[mb_inds], b_locs[mb_inds], b_r_messages[mb_inds]),
+                                    (initial_lstm_state[0][:, mbenvinds], initial_lstm_state[1][:, mbenvinds]),
+                                    b_dones[mb_inds],
+                                    b_actions.long()[mb_inds],
+                                    b_s_messages.long()[mb_inds],
+                                )
                 
                 action_logratio = new_action_logprob - b_action_logprobs[mb_inds]
                 action_ratio = action_logratio.exp()
@@ -316,7 +314,12 @@ if __name__ == "__main__":
                 # Message loss
                 mg_loss1 = -mb_advantages * message_ratio
                 mg_loss2 = -mb_advantages * torch.clamp(message_ratio, 1 - args.clip_coef, 1 + args.clip_coef)
-                mg_loss = torch.max(mg_loss1, mg_loss2).mean()
+                mg_loss_element = torch.max(mg_loss1, mg_loss2)
+
+                if args.mask_message_grad:
+                    mg_loss_element = mg_loss_element * mb_masks.float()
+
+                mg_loss = mg_loss_element.mean()
 
                 # Value loss
                 newvalue = newvalue.view(-1)
@@ -335,8 +338,29 @@ if __name__ == "__main__":
 
                 action_entropy_loss = action_entropy.mean()
                 message_entropy_loss = message_entropy.mean()
-                loss = pg_loss + mg_loss - (args.ent_coef * action_entropy_loss) - (args.m_ent_coef * message_entropy_loss) + v_loss * args.vf_coef
 
+
+                # Supervised Auxiliary Losses
+                mask_loss = nn.functional.cross_entropy(mask_logits, mb_masks.long())
+                time_loss_elementwise = nn.functional.cross_entropy(
+                    time_logits, 
+                    mb_times.long(), 
+                    reduction='none'
+                )
+                masked_time_loss = time_loss_elementwise * mb_masks.float()
+                valid_sample_count = mb_masks.float().sum() + 1e-8
+                time_loss = masked_time_loss.sum() / valid_sample_count
+
+                # Total loss
+                loss = (
+                    pg_loss 
+                    + mg_loss 
+                    - (args.ent_coef * action_entropy_loss) 
+                    - (args.m_ent_coef * message_entropy_loss) 
+                    + (args.vf_coef * v_loss) 
+                    + (args.mask_coef * mask_loss) 
+                    + (args.time_coef * time_loss)
+                )
 
                 optimizer.zero_grad()
                 loss.backward()
@@ -353,6 +377,8 @@ if __name__ == "__main__":
             writer.add_scalar("losses/message_loss", mg_loss.item(), global_step)
             writer.add_scalar("losses/action_entropy", action_entropy_loss.item(), global_step)
             writer.add_scalar("losses/message_entropy", message_entropy_loss.item(), global_step)
+            writer.add_scalar("losses/mask_loss", mask_loss.item(), global_step)
+            writer.add_scalar("losses/time_loss", time_loss.item(), global_step)
             writer.add_scalar("charts/SPS", SPS, global_step)
             print(f"SPS: {SPS}")
 
