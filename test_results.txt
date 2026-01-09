@@ -1,5 +1,0 @@
-Model: ./checkpoints/temporal_3d/seed3/model_step_201600000.pt
-Episodes: 10
-Average Reward: 0.6300
-Success Rate: 50.00%
-Average Length: 23.00
