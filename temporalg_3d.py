@@ -286,8 +286,10 @@ class TemporalGEnv:
         # TERMINAL REWARD
         if d_target[0] < self.COLLECT_DIST and d_target[1] < self.COLLECT_DIST:
             reward = 1.0; done = True; status = "SUCCESS"
-        elif self.distractor_reward and d_distractor[0] < self.COLLECT_DIST and d_distractor[1] < self.COLLECT_DIST:
-            reward = 0.3; done = True; status = "DISTRACTOR"
+        elif d_distractor[0] < self.COLLECT_DIST and d_distractor[1] < self.COLLECT_DIST:
+            done = True; status = "DISTRACTOR"
+            if self.distractor_reward:
+                reward = 0.1
         # TERMINAL PARTIAL REWARD
         elif self.step_count >= self.max_steps:
             done = True
