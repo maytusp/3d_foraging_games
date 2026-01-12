@@ -13,7 +13,8 @@ from pettingzoo.utils import ParallelEnv
 import pkgutil
 
 class TemporalGEnv:
-    def __init__(self, headless=False, image_size=96, max_steps=32):
+    def __init__(self, headless, image_size, max_steps, collect_distractor):
+        self.collect_distractor = collect_distractor
         self.distractor_reward = False # The reward is for initialize navigation behaviour to go to object
         self.partial_reward = False
         self.mode = p.DIRECT if headless else p.GUI
@@ -286,10 +287,11 @@ class TemporalGEnv:
         # TERMINAL REWARD
         if d_target[0] < self.COLLECT_DIST and d_target[1] < self.COLLECT_DIST:
             reward = 1.0; done = True; status = "SUCCESS"
-        elif d_distractor[0] < self.COLLECT_DIST and d_distractor[1] < self.COLLECT_DIST:
+        # IF COLLECT DISTRACTOR
+        elif self.collect_distractor and d_distractor[0] < self.COLLECT_DIST and d_distractor[1] < self.COLLECT_DIST:
             done = True; status = "DISTRACTOR"
             if self.distractor_reward:
-                reward = 0.1
+                reward = 0.05
         # TERMINAL PARTIAL REWARD
         elif self.step_count >= self.max_steps:
             done = True
@@ -461,10 +463,10 @@ class TemporalGEnv:
 class PettingZooWrapper(ParallelEnv):
     metadata = {"render_modes": ["human"], "name": "3d_temporalg_v1"}
 
-    def __init__(self, headless=True, image_size=46, max_steps=32):
+    def __init__(self, headless=True, image_size=46, max_steps=32, collect_distractor=True):
         self.render_mode = None if headless else "human"
         self.possible_agents = ["agent_0", "agent_1"]
-        self.env = TemporalGEnv(headless=headless, image_size=image_size, max_steps=max_steps)
+        self.env = TemporalGEnv(headless=headless, image_size=image_size, max_steps=max_steps, collect_distractor=collect_distractor)
         self.FREEZE_STEPS = self.env.FREEZE_STEPS
         # Simple Actions: Move Forward, Turn Left, Turn Right
         self.action_space_map = {agent: spaces.Discrete(3) for agent in self.possible_agents}

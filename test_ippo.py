@@ -5,8 +5,8 @@ import numpy as np
 import torch
 import tyro
 import supersuit as ss
-import imageio
-import cv2
+
+import imageio.v2 as imageio
 
 # Import your environment and model
 from temporalg_3d import PettingZooWrapper 
@@ -15,8 +15,10 @@ from models import PPOLSTMCommAgent
 @dataclass
 class TestArgs:
     # Path to the trained model checkpoint (Required)
-    model_path: str = "./checkpoints/temporal_3d/seed3/model_step_201600000.pt"
-    
+    exp_name = "ippo_ms32_nenv8nb8_auxMaskTime_seed1"
+    seed_name = "seed1"
+    ckpt_name = "model_step_96000000"
+    model_path: str = f"./checkpoints/train_from_scratch/{exp_name}/{seed_name}/{ckpt_name}.pt"
     # Environment settings (Must match training)
     env_id: str = "TemporalG-v1"
     seed: int = 1
@@ -29,7 +31,7 @@ class TestArgs:
     # Test specific settings
     num_test_episodes: int = 50
     record_video: bool = True
-    video_dir: str = "test_videos"
+    log_dir: str = f"logs/{exp_name}/{seed_name}/{ckpt_name}"
     cuda: bool = True
     
     # If the environment renders explicitly, set this to true
@@ -87,9 +89,7 @@ def main(args: TestArgs):
 
     agent.eval()
     
-    # 5. Setup Logging
-    if args.record_video:
-        os.makedirs(args.video_dir, exist_ok=True)
+    os.makedirs(os.path.join(args.log_dir, "videos"), exist_ok=True)
     
     total_rewards = []
     lengths = []
@@ -137,7 +137,7 @@ def main(args: TestArgs):
 
             # --- 2. AGENT ACTION ---
             with torch.no_grad():
-                action, _, _, s_message, _, _, _, next_lstm_state = agent.get_action_and_value(
+                action, _, _, s_message, _, _, _, _, _, next_lstm_state = agent.get_action_and_value(
                     (obs, locs, r_messages), 
                     lstm_state, 
                     dones
@@ -179,27 +179,25 @@ def main(args: TestArgs):
         is_success = 1 if avg_ep_reward == 1 else 0
         successes.append(is_success)
 
-        # --- SAVE VIDEO (USING OPENCV) ---
+        # save video
         if args.record_video and len(frames) > 0:
-            video_name = os.path.join(args.video_dir, f"episode_{episode+1}_rew_{avg_ep_reward:.2f}.mp4")
-            
-            # Get dimensions from the first frame
-            height, width, _ = frames[0].shape
+            video_name = os.path.join(
+                args.log_dir,
+                f"episode_{episode+1}_rew_{avg_ep_reward:.2f}.mp4"
+            )
+
             fps = 4.0
-            # Define the codec (mp4v is standard for .mp4)
-            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-            out = cv2.VideoWriter(video_name, fourcc, fps, (width, height))
-            
-            if not out.isOpened():
-                print(f"Error: Could not open video writer for {video_name}")
-            else:
-                for frame in frames:
-                    # OpenCV uses BGR, but we have RGB from Gym/Torch
-                    # We must convert it, or the colors will look wrong (blue skin, etc)
-                    frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-                    out.write(frame_bgr)
-                
-                out.release()
+
+            # imageio expects RGB uint8 frames (which you already have)
+            imageio.mimsave(
+                video_name,
+                frames,
+                fps=fps,
+                codec="libx264",
+                pixelformat="yuv420p",
+                quality=8,              # optional (0–10)
+                macro_block_size=None,  # prevents resizing warnings
+            )
 
     envs.close()
 
@@ -208,7 +206,7 @@ def main(args: TestArgs):
     success_rate = np.mean(successes) * 100
     avg_len = np.mean(lengths)
     
-    stats_path = os.path.join(args.video_dir, "test_results.txt")
+    stats_path = os.path.join(args.log_dir, "test_results.txt")
     with open(stats_path, "w") as f:
         f.write(f"Model: {args.model_path}\n")
         f.write(f"Episodes: {args.num_test_episodes}\n")
@@ -222,7 +220,7 @@ def main(args: TestArgs):
     print(f"Success Rate: {success_rate:.2f}%")
     print(f"Results saved to {stats_path}")
     if args.record_video:
-        print(f"Videos saved to {args.video_dir}/")
+        print(f"Videos saved to {args.log_dir}/")
     print("-" * 30)
 
 if __name__ == "__main__":

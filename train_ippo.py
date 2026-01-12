@@ -36,12 +36,12 @@ class Args:
     env_id: str = "TemporalG-v1"
     total_timesteps: int = int(1e9) 
     learning_rate: float = 2.5e-4
-    num_envs: int = 16
+    num_envs: int = 8 # I don't know why using num_envs = 4 seems to converge better
     num_steps: int = 128
     anneal_lr: bool = True
     gamma: float = 0.99
     gae_lambda: float = 0.95
-    num_minibatches: int = 4
+    num_minibatches: int = 8
     update_epochs: int = 4
     norm_adv: bool = True
     clip_coef: float = 0.1
@@ -49,22 +49,33 @@ class Args:
     ent_coef: float = 0.01
     m_ent_coef: float = 0.002
     vf_coef: float = 0.5
-    mask_coef: float = 0.2
-    time_coef: float = 0.2
+    mask_coef: float = 0.2 # orig 0.2
+    time_coef: float = 0.0 # orig 0.2
     max_grad_norm: float = 0.5
     target_kl: float = None
     log_every = 10
-    
+
+    aux_loss_prefix_dict = {"00": "", 
+                            "01": "auxTime_", 
+                            "10" : "auxMask_", 
+                            "11": "auxMaskTime_"}
+    aux_key = f"{int(mask_coef > 0)}{int(time_coef > 0)}"
+    aux_loss_prefix = aux_loss_prefix_dict[aux_key]
+
     n_words = 4
     image_size = 48
     max_steps = 32
     mask_message_grad: bool = True
+    collect_distractor: bool = True # If agents cannot collect distractor, communication may not be necessary
+    
+
 
     batch_size: int = 0
     minibatch_size: int = 0
     num_iterations: int = 0
     pretrained_path = None # "./checkpoints/pretrained_nav/model_step_201600000.pt"
-    exp_name = f"ippo_ms{max_steps}_aux_mask_time_seed{seed}"
+    
+    exp_name = f"ippo_ms{max_steps}_nenv8nb8_{aux_loss_prefix}seed{seed}"
     save_dir = f"checkpoints/train_from_scratch/{exp_name}/seed{seed}/"
     os.makedirs(save_dir, exist_ok=True)
     load_pretrained = False
@@ -84,6 +95,7 @@ if __name__ == "__main__":
     # Let's assume standard concatenated vec envs.
     
     run_name = args.exp_name
+    print(f"Experiment: {args.exp_name}")
     if args.track:
         import wandb
         wandb.init(project=args.wandb_project_name,
@@ -102,11 +114,8 @@ if __name__ == "__main__":
 
     device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
 
-    # --- ENV SETUP ---
     def make_env():
-        return PettingZooWrapper(headless=True, image_size=args.image_size, max_steps=args.max_steps)
-
-    # 1. Create Base Env
+        return PettingZooWrapper(headless=True, image_size=args.image_size, max_steps=args.max_steps, collect_distractor=args.collect_distractor)
     env = make_env()
     
     # 2. Vectorize using Supersuit
@@ -341,15 +350,20 @@ if __name__ == "__main__":
 
 
                 # Supervised Auxiliary Losses
-                mask_loss = nn.functional.cross_entropy(mask_logits, mb_masks.long())
-                time_loss_elementwise = nn.functional.cross_entropy(
-                    time_logits, 
-                    mb_times.long(), 
-                    reduction='none'
-                )
-                masked_time_loss = time_loss_elementwise * mb_masks.float()
-                valid_sample_count = mb_masks.float().sum() + 1e-8
-                time_loss = masked_time_loss.sum() / valid_sample_count
+                mask_loss = pg_loss.new_zeros(())
+                time_loss = pg_loss.new_zeros(())
+                if args.mask_coef > 0:
+                    mask_loss = nn.functional.cross_entropy(mask_logits, mb_masks.long())
+
+                if args.time_coef > 0:
+                    time_loss_elementwise = nn.functional.cross_entropy(
+                        time_logits, 
+                        mb_times.long(), 
+                        reduction='none'
+                    )
+                    masked_time_loss = time_loss_elementwise * mb_masks.float()
+                    valid_sample_count = mb_masks.float().sum() + 1e-8
+                    time_loss = masked_time_loss.sum() / valid_sample_count
 
                 # Total loss
                 loss = (
@@ -377,8 +391,10 @@ if __name__ == "__main__":
             writer.add_scalar("losses/message_loss", mg_loss.item(), global_step)
             writer.add_scalar("losses/action_entropy", action_entropy_loss.item(), global_step)
             writer.add_scalar("losses/message_entropy", message_entropy_loss.item(), global_step)
-            writer.add_scalar("losses/mask_loss", mask_loss.item(), global_step)
-            writer.add_scalar("losses/time_loss", time_loss.item(), global_step)
+            if args.mask_coef > 0:
+                writer.add_scalar("losses/mask_loss", mask_loss.item(), global_step)
+            if args.time_coef > 0:
+                writer.add_scalar("losses/time_loss", time_loss.item(), global_step)
             writer.add_scalar("charts/SPS", SPS, global_step)
             print(f"SPS: {SPS}")
 
