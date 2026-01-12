@@ -19,6 +19,8 @@ class TestArgs:
     seed_name = "seed1"
     ckpt_name = "model_step_96000000"
     model_path: str = f"./checkpoints/train_from_scratch/{exp_name}/{seed_name}/{ckpt_name}.pt"
+    eval = True
+    mode_dict = {0:"train", 1:"test"}
     # Environment settings (Must match training)
     env_id: str = "TemporalG-v1"
     seed: int = 1
@@ -31,7 +33,7 @@ class TestArgs:
     # Test specific settings
     num_test_episodes: int = 50
     record_video: bool = True
-    log_dir: str = f"logs/{exp_name}/{seed_name}/{ckpt_name}"
+    log_dir: str = f"logs/{exp_name}/{seed_name}/{ckpt_name}/mode_{mode_dict[eval]}"
     cuda: bool = True
     
     # If the environment renders explicitly, set this to true
@@ -62,7 +64,7 @@ def main(args: TestArgs):
     # Assuming PettingZooWrapper accepts render_mode or we use wrappers.
     # If your wrapper doesn't support render_mode in init, you might need to adjust this.
     def make_env():
-        return PettingZooWrapper(headless=True, image_size=args.image_size, max_steps=args.max_steps)
+        return PettingZooWrapper(headless=True, image_size=args.image_size, max_steps=args.max_steps, eval=args.eval)
     
     env = make_env()
     

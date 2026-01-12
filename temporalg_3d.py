@@ -13,7 +13,7 @@ from pettingzoo.utils import ParallelEnv
 import pkgutil
 
 class TemporalGEnv:
-    def __init__(self, headless, image_size, max_steps, collect_distractor):
+    def __init__(self, headless, image_size, max_steps, collect_distractor, eval):
         self.collect_distractor = collect_distractor
         self.distractor_reward = False # The reward is for initialize navigation behaviour to go to object
         self.partial_reward = False
@@ -32,7 +32,7 @@ class TemporalGEnv:
         self.LIN_SPEED = self.FORWARD_DIST / self.ACTION_DURATION
         self.ANG_SPEED = math.radians(self.TARGET_ANGLE) / self.ACTION_DURATION
         self.STEPS_PER_ACTION = int(self.ACTION_DURATION / self.dt)
-
+        self.eval = eval
         self.FREEZE_STEPS = 6
         self.TARGET_SIZE = 0.3
         self.COLLECT_DIST = 1.0
@@ -330,7 +330,11 @@ class TemporalGEnv:
         self._teleport_item(self.item_blue, [pos1[0], pos1[1], -5.0])
 
     def _setup_temporal_logic(self):
-        times = sorted(random.sample(range(1, self.FREEZE_STEPS + 1), 2))
+        if self.eval: # remove first and last time steps seen during training
+            times = sorted(random.sample(range(2, self.FREEZE_STEPS), 2))
+        else:
+            times = sorted(random.sample(range(1, self.FREEZE_STEPS + 1), 2))
+
         self.target_idx = random.choice([0, 1])
         self.distractor_idx = 1 - self.target_idx
         self.spawn_time_target, self.spawn_time_distractor = times
@@ -463,10 +467,10 @@ class TemporalGEnv:
 class PettingZooWrapper(ParallelEnv):
     metadata = {"render_modes": ["human"], "name": "3d_temporalg_v1"}
 
-    def __init__(self, headless=True, image_size=46, max_steps=32, collect_distractor=True):
+    def __init__(self, headless=True, image_size=46, max_steps=32, collect_distractor=True, eval=False):
         self.render_mode = None if headless else "human"
         self.possible_agents = ["agent_0", "agent_1"]
-        self.env = TemporalGEnv(headless=headless, image_size=image_size, max_steps=max_steps, collect_distractor=collect_distractor)
+        self.env = TemporalGEnv(headless=headless, image_size=image_size, max_steps=max_steps, collect_distractor=collect_distractor, eval=eval)
         self.FREEZE_STEPS = self.env.FREEZE_STEPS
         # Simple Actions: Move Forward, Turn Left, Turn Right
         self.action_space_map = {agent: spaces.Discrete(3) for agent in self.possible_agents}
