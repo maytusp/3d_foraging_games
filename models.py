@@ -22,7 +22,8 @@ class PPOLSTMCommAgent(nn.Module):
     Agent with communication
     Observations: [image, location, message]
     '''
-    def __init__(self, num_actions=3, n_words=4, embedding_size=64, num_channels=3, image_size=96, max_duration=12):
+    def __init__(self, num_actions=3, n_words=4, embedding_size=64, num_channels=3, image_size=96, max_duration=12,
+    pretrained_embedding=False, freeze_embedding=False, embedding_path=None):
         super().__init__()
         self.max_duration = max_duration # maximum spawn durations: initial training is 6 but we can extend to 12
         self.visual_dim = 128
@@ -50,7 +51,39 @@ class PPOLSTMCommAgent(nn.Module):
             nn.Linear(embedding_size, embedding_size), 
             nn.ReLU(),
         )
-        
+        if pretrained_embedding:
+            # 1. Load the state dict into a variable first
+            checkpoint = torch.load(embedding_path)
+            
+            # 1. Extract and rename only the keys meant for the message_encoder
+            prefix = "message_encoder."
+            loaded_state_dict = {
+                k[len(prefix):]: v for k, v in checkpoint.items() 
+                if k.startswith(prefix)
+            }
+            
+            # 2. Load into the model and capture the return values
+            load_result = self.message_encoder.load_state_dict(loaded_state_dict, strict=False)
+            
+            # 3. Calculate statistics
+            total_model_keys = len(self.message_encoder.state_dict())
+            total_loaded_keys = len(loaded_state_dict)
+            missing_count = len(load_result.missing_keys)
+            unexpected_count = len(load_result.unexpected_keys)
+            
+            # The number of keys that successfully matched is the total in the model minus what was missing
+            matched_count = total_model_keys - missing_count
+            
+            print(f"Total keys in model: {total_model_keys}")
+            print(f"Total keys in loaded dict: {total_loaded_keys}")
+            print(f"Matched keys: {matched_count}")
+            print(f"Missing keys (in model but not in dict): {missing_count}")
+            print(f"Unexpected keys (in dict but not in model): {unexpected_count}")
+
+        if freeze_embedding:
+            for param in self.message_encoder.parameters():
+                param.requires_grad = False
+                
         self.location_encoder = nn.Linear(4, self.loc_dim) # Input size 4 (x, y , dx, dy)
         
 
@@ -68,29 +101,36 @@ class PPOLSTMCommAgent(nn.Module):
 
         self.mask_head = layer_init(nn.Linear(self.hidden_dim, 2), std=0.01)
         self.time_head = layer_init(nn.Linear(self.hidden_dim, self.max_duration), std=0.01)
-        
-    def get_states(self, input, lstm_state, done, tracks=None):
-        batch_size = lstm_state[0].shape[1]
+
+        # self-prediction head: predict the next latent state
+        self.predictor = nn.Sequential(
+                nn.Linear(self.hidden_dim, self.hidden_dim),
+                nn.ReLU(),
+                nn.Linear(self.hidden_dim, self.input_dim)
+            )
+    def _get_features(self, input):
+        """
+        Helper to extract features from raw observations.
+        Used for both the current step (input to LSTM) and the next step (target for predictor).
+        """
         image, location, message = input
-        
-        # Image Processing
-        # Image comes in as (Batch, H, W, C) or (Batch, C, H, W). PyTorch expects (Batch, C, H, W)
-        # Assuming input is (Batch, C, H, W) scaled 0-255.
+
         x = image / 255.0
-        # EfficientNet expects normalized data
         x = self.normalize(x)
         image_feat = self.visual_projector(self.visual_encoder(x).flatten(start_dim=1))
 
-        # Location Processing
-        location_feat = self.location_encoder(location) # (Batch, loc_dim)
+        location_feat = self.location_encoder(location)
 
-        # Message Processing
         message_feat = self.message_encoder(message) 
-        message_feat = message_feat.view(-1, self.embedding_size) # (Batch, embedding_size)
+        message_feat = message_feat.view(-1, self.embedding_size)
 
-        # Concatenate
-        hidden = torch.cat((image_feat, location_feat, message_feat), dim=1)
+        features = torch.cat((image_feat, location_feat, message_feat), dim=1)
+        return features
 
+    def get_states(self, input, lstm_state, done, tracks=None):
+        batch_size = lstm_state[0].shape[1]
+        hidden = self._get_features(input)
+    
         # LSTM logic
         hidden = hidden.reshape((-1, batch_size, self.lstm.input_size))
         done = done.reshape((-1, batch_size))
@@ -140,6 +180,8 @@ class PPOLSTMCommAgent(nn.Module):
         mask_logits = self.mask_head(hidden)
         time_logits = self.time_head(hidden)
 
+        predicted_next_features = self.predictor(hidden)
+
         return (
             action, 
             action_probs.log_prob(action), 
@@ -150,6 +192,7 @@ class PPOLSTMCommAgent(nn.Module):
             self.critic(hidden), 
             mask_logits,
             time_logits,
+            predicted_next_features,
             lstm_state
         )
         

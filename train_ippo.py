@@ -34,7 +34,7 @@ def extract_dict(obs_batch, device):
 class Args:
     seed: int = 1
     env_id: str = "TemporalG-v1"
-    total_timesteps: int = int(1e9) 
+    total_timesteps: int = int(3e8) 
     learning_rate: float = 2.5e-4
     num_envs: int = 8 # I don't know why using num_envs = 4 seems to converge better
     num_steps: int = 128
@@ -49,8 +49,19 @@ class Args:
     ent_coef: float = 0.01
     m_ent_coef: float = 0.002
     vf_coef: float = 0.5
-    mask_coef: float = 0.2 # orig 0.2
+    mask_coef: float = 0.0 # orig 0.2
     time_coef: float = 0.0 # orig 0.2
+    # self-prediction
+    pred_coef: float = 0.1
+
+    # Embedding Option
+    pretrained_embedding: bool = False
+    freeze_embedding: bool = False
+    embedding_path: str = None # "./checkpoints/2d_temporalg/1B.pt"
+    embedding_prefix = "" # "_pt_freeze"
+
+
+
     max_grad_norm: float = 0.5
     target_kl: float = None
     log_every = 10
@@ -61,8 +72,10 @@ class Args:
                             "11": "auxMaskTime_"}
     aux_key = f"{int(mask_coef > 0)}{int(time_coef > 0)}"
     aux_loss_prefix = aux_loss_prefix_dict[aux_key]
+    self_pred_prefix = "selfpred_" if pred_coef > 0 else ""
 
-    n_words = 4
+    n_words = 4 # original is 4, we try 3 to match the pretrained temporalg version
+    embedding_size = 64 # original is 64, we try 16 to test if it works for pretrained embedding from 2DTemporalG
     image_size = 48
     max_steps = 32
     mask_message_grad: bool = True
@@ -75,8 +88,8 @@ class Args:
     num_iterations: int = 0
     pretrained_path = None # "./checkpoints/pretrained_nav/model_step_201600000.pt"
     
-    exp_name = f"ippo_ms{max_steps}_nenv8nb8_{aux_loss_prefix}seed{seed}"
-    save_dir = f"checkpoints/train_from_scratch/{exp_name}/seed{seed}/"
+    exp_name = f"ippo_ms{max_steps}_nenv8nb8_nw{n_words}_{aux_loss_prefix}{self_pred_prefix}seed{seed}{embedding_prefix}"
+    save_dir = f"checkpoints/train_from_scratch/{exp_name}"
     os.makedirs(save_dir, exist_ok=True)
     load_pretrained = False
     visualize_loss = True
@@ -134,9 +147,12 @@ if __name__ == "__main__":
 
     agent = PPOLSTMCommAgent(num_actions=3, 
                             n_words=args.n_words, 
-                            embedding_size=64, 
+                            embedding_size=args.embedding_size, 
                             num_channels=3, 
-                            image_size=args.image_size).to(device)
+                            image_size=args.image_size,
+                            pretrained_embedding=args.pretrained_embedding,
+                            freeze_embedding=args.freeze_embedding,
+                            embedding_path=args.embedding_path).to(device)
     if args.pretrained_path:
         print(f"Loading model from {args.pretrained_path}...")
         agent.load_state_dict(torch.load(args.pretrained_path, map_location=device))
@@ -202,7 +218,7 @@ if __name__ == "__main__":
             # 1. Agent Forward Pass
             # We pass 'next_r_messages' which was calculated at the end of the PREVIOUS step
             with torch.no_grad():
-                action, action_logprob, _, s_message, message_logprob, _, value, _, _, next_lstm_state = agent.get_action_and_value(
+                action, action_logprob, _, s_message, message_logprob, _, value, _, _, _, next_lstm_state = agent.get_action_and_value(
                     (next_obs, next_locs, next_r_messages), 
                     next_lstm_state, 
                     next_done
@@ -285,6 +301,20 @@ if __name__ == "__main__":
         b_masks = masks_store.reshape(-1)
         b_times = times_store.reshape(-1)
 
+        if args.pred_coef > 0:
+            targets_obs = torch.cat((obs[1:], next_obs.unsqueeze(0)), dim=0)
+            b_targets_obs = targets_obs.reshape((-1, 3, args.image_size, args.image_size))
+            
+            targets_locs = torch.cat((raw_locs[1:], next_locs.unsqueeze(0)), dim=0)
+            b_targets_locs = targets_locs.reshape(-1, 4)
+            
+            targets_msgs = torch.cat((r_messages[1:], next_r_messages.unsqueeze(0)), dim=0)
+            b_targets_msgs = targets_msgs.reshape(-1)
+        else:
+            b_targets_obs = None
+            b_targets_locs = None
+            b_targets_msgs = None
+
         envsperbatch = total_agents // args.num_minibatches
         envinds = np.arange(total_agents)
         flatinds = np.arange(args.batch_size).reshape(args.num_steps, total_agents)
@@ -297,7 +327,7 @@ if __name__ == "__main__":
                 mb_inds = flatinds[:, mbenvinds].ravel()
                 mb_masks = b_masks[mb_inds]
                 mb_times = b_times[mb_inds]
-                _, new_action_logprob, action_entropy, _, new_message_logprob, message_entropy, newvalue, mask_logits, time_logits, _ = agent.get_action_and_value(
+                _, new_action_logprob, action_entropy, _, new_message_logprob, message_entropy, newvalue, mask_logits, time_logits, pred_next_features, _ = agent.get_action_and_value(
                                     (b_obs[mb_inds], b_locs[mb_inds], b_r_messages[mb_inds]),
                                     (initial_lstm_state[0][:, mbenvinds], initial_lstm_state[1][:, mbenvinds]),
                                     b_dones[mb_inds],
@@ -348,7 +378,6 @@ if __name__ == "__main__":
                 action_entropy_loss = action_entropy.mean()
                 message_entropy_loss = message_entropy.mean()
 
-
                 # Supervised Auxiliary Losses
                 mask_loss = pg_loss.new_zeros(())
                 time_loss = pg_loss.new_zeros(())
@@ -365,6 +394,20 @@ if __name__ == "__main__":
                     valid_sample_count = mb_masks.float().sum() + 1e-8
                     time_loss = masked_time_loss.sum() / valid_sample_count
 
+                # self-prediction loss
+                if args.pred_coef > 0:
+                    with torch.no_grad():
+                        target_features = agent._get_features(
+                                            (b_targets_obs[mb_inds], b_targets_locs[mb_inds], b_targets_msgs[mb_inds])
+                                            )
+                
+                    raw_pred_loss = (pred_next_features - target_features) ** 2
+                    raw_pred_loss = raw_pred_loss.mean(dim=-1)
+                    valid_prediction_mask = (1.0 - b_dones[mb_inds])
+                    
+                    prediction_loss = (raw_pred_loss * valid_prediction_mask).sum() / (valid_prediction_mask.sum() + 1e-8)
+                else:
+                    prediction_loss = torch.tensor(0.0).to(device)
                 # Total loss
                 loss = (
                     pg_loss 
@@ -374,6 +417,7 @@ if __name__ == "__main__":
                     + (args.vf_coef * v_loss) 
                     + (args.mask_coef * mask_loss) 
                     + (args.time_coef * time_loss)
+                    + (args.pred_coef * prediction_loss)
                 )
 
                 optimizer.zero_grad()
@@ -395,6 +439,8 @@ if __name__ == "__main__":
                 writer.add_scalar("losses/mask_loss", mask_loss.item(), global_step)
             if args.time_coef > 0:
                 writer.add_scalar("losses/time_loss", time_loss.item(), global_step)
+            if args.pred_coef > 0:
+                writer.add_scalar("losses/prediction_loss", prediction_loss.item(), global_step)
             writer.add_scalar("charts/SPS", SPS, global_step)
             print(f"SPS: {SPS}")
 

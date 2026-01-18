@@ -20,7 +20,9 @@ class TestArgs:
     ckpt_name = "model_step_96000000"
     model_path: str = f"./checkpoints/train_from_scratch/{exp_name}/{seed_name}/{ckpt_name}.pt"
     eval = True
+    ablate_message = True
     mode_dict = {0:"train", 1:"test"}
+    ablate_message_dict = {0: "normal", 1: "zero"}
     # Environment settings (Must match training)
     env_id: str = "TemporalG-v1"
     seed: int = 1
@@ -33,7 +35,7 @@ class TestArgs:
     # Test specific settings
     num_test_episodes: int = 50
     record_video: bool = True
-    log_dir: str = f"logs/{exp_name}/{seed_name}/{ckpt_name}/mode_{mode_dict[eval]}"
+    log_dir: str = f"logs/{exp_name}/{seed_name}/{ckpt_name}/mode_{mode_dict[eval]}/{ablate_message_dict[ablate_message]}"
     cuda: bool = True
     
     # If the environment renders explicitly, set this to true
@@ -120,13 +122,9 @@ def main(args: TestArgs):
         episode_reward = np.zeros(total_agents)
         frames = []
         step_count = 0
-        
-# ... inside the episode loop ...
-        
+
         while True:
             step_count += 1
-            
-
             if args.record_video:
                 try:
                     frame = envs.render() 
@@ -145,7 +143,7 @@ def main(args: TestArgs):
                     dones
                 )
             
-            # --- 3. ENVIRONMENT STEP ---
+            # ENVIRONMENT STEP
             env_action = action.cpu().numpy()
             
             # Note: We capture 'next_obs_dict' here to use in the NEXT loop iteration
@@ -163,6 +161,8 @@ def main(args: TestArgs):
             dones = torch.Tensor(done_np).to(device)
 
             # Message Exchange Logic
+            if args.ablate_message:
+                next_masks = 0
             s_msgs_reshaped = s_message.view(-1, 2)
             swapped_msgs = torch.flip(s_msgs_reshaped, dims=[1]).flatten()
             r_messages = swapped_msgs * next_masks
@@ -170,7 +170,7 @@ def main(args: TestArgs):
             if np.any(done_np):
                 break
         
-        # --- Metrics Recording ---
+        # Metrics Recording
         # Since VecEnv auto-resets, the reward we summed is correct for the episode.
         # We average reward across agents (or take sum depending on your metric).
         avg_ep_reward = np.mean(episode_reward)
