@@ -52,7 +52,11 @@ class Args:
     mask_coef: float = 0.0 # orig 0.2
     time_coef: float = 0.0 # orig 0.2
     # self-prediction
-    pred_coef: float = 0.1
+    pred_coef: float = 1.0
+
+    # order prediction
+    order_coef: float = 1.0
+    n_order: int = 6
 
     # Embedding Option
     pretrained_embedding: bool = False
@@ -72,8 +76,9 @@ class Args:
                             "11": "auxMaskTime_"}
     aux_key = f"{int(mask_coef > 0)}{int(time_coef > 0)}"
     aux_loss_prefix = aux_loss_prefix_dict[aux_key]
-    self_pred_prefix = "selfpred_" if pred_coef > 0 else ""
-
+    self_pred_prefix = f"selfpred_{pred_coef}_" if pred_coef > 0 else ""
+    order_pred_prefix = f"order{order_coef}_" if order_coef > 0 else ""
+    
     n_words = 4 # original is 4, we try 3 to match the pretrained temporalg version
     embedding_size = 64 # original is 64, we try 16 to test if it works for pretrained embedding from 2DTemporalG
     image_size = 48
@@ -88,7 +93,7 @@ class Args:
     num_iterations: int = 0
     pretrained_path = None # "./checkpoints/pretrained_nav/model_step_201600000.pt"
     
-    exp_name = f"ippo_ms{max_steps}_nenv8nb8_nw{n_words}_{aux_loss_prefix}{self_pred_prefix}seed{seed}{embedding_prefix}"
+    exp_name = f"ippo_ms{max_steps}_nenv8nb8_nw{n_words}_{aux_loss_prefix}{self_pred_prefix}{order_pred_prefix}seed{seed}{embedding_prefix}"
     save_dir = f"checkpoints/train_from_scratch/{exp_name}"
     os.makedirs(save_dir, exist_ok=True)
     load_pretrained = False
@@ -97,7 +102,7 @@ class Args:
     
     torch_deterministic: bool = True
     cuda: bool = True
-    track: bool = True
+    track: bool = False
     wandb_project_name: str = "temporalg_3d_silence_token"
     wandb_entity: str = "maytusp"
 
@@ -144,7 +149,6 @@ if __name__ == "__main__":
     args.num_iterations = args.total_timesteps // args.batch_size
 
     # -----------------
-
     agent = PPOLSTMCommAgent(num_actions=3, 
                             n_words=args.n_words, 
                             embedding_size=args.embedding_size, 
@@ -152,7 +156,8 @@ if __name__ == "__main__":
                             image_size=args.image_size,
                             pretrained_embedding=args.pretrained_embedding,
                             freeze_embedding=args.freeze_embedding,
-                            embedding_path=args.embedding_path).to(device)
+                            embedding_path=args.embedding_path,
+                            n_order=args.n_order).to(device) # <--- Pass n_order here
     if args.pretrained_path:
         print(f"Loading model from {args.pretrained_path}...")
         agent.load_state_dict(torch.load(args.pretrained_path, map_location=device))
@@ -218,7 +223,7 @@ if __name__ == "__main__":
             # 1. Agent Forward Pass
             # We pass 'next_r_messages' which was calculated at the end of the PREVIOUS step
             with torch.no_grad():
-                action, action_logprob, _, s_message, message_logprob, _, value, _, _, _, next_lstm_state = agent.get_action_and_value(
+                action, action_logprob, _, s_message, message_logprob, _, value, _, _, _, next_lstm_state, _ = agent.get_action_and_value(
                     (next_obs, next_locs, next_r_messages), 
                     next_lstm_state, 
                     next_done
@@ -327,14 +332,13 @@ if __name__ == "__main__":
                 mb_inds = flatinds[:, mbenvinds].ravel()
                 mb_masks = b_masks[mb_inds]
                 mb_times = b_times[mb_inds]
-                _, new_action_logprob, action_entropy, _, new_message_logprob, message_entropy, newvalue, mask_logits, time_logits, pred_next_features, _ = agent.get_action_and_value(
-                                    (b_obs[mb_inds], b_locs[mb_inds], b_r_messages[mb_inds]),
-                                    (initial_lstm_state[0][:, mbenvinds], initial_lstm_state[1][:, mbenvinds]),
-                                    b_dones[mb_inds],
-                                    b_actions.long()[mb_inds],
-                                    b_s_messages.long()[mb_inds],
-                                )
-                
+                _, new_action_logprob, action_entropy, _, new_message_logprob, message_entropy, newvalue, mask_logits, time_logits, pred_next_features, _, lstm_output_flat = agent.get_action_and_value(
+                                                    (b_obs[mb_inds], b_locs[mb_inds], b_r_messages[mb_inds]),
+                                                    (initial_lstm_state[0][:, mbenvinds], initial_lstm_state[1][:, mbenvinds]),
+                                                    b_dones[mb_inds],
+                                                    b_actions.long()[mb_inds],
+                                                    b_s_messages.long()[mb_inds],
+                                                )
                 action_logratio = new_action_logprob - b_action_logprobs[mb_inds]
                 action_ratio = action_logratio.exp()
 
@@ -408,6 +412,16 @@ if __name__ == "__main__":
                     prediction_loss = (raw_pred_loss * valid_prediction_mask).sum() / (valid_prediction_mask.sum() + 1e-8)
                 else:
                     prediction_loss = torch.tensor(0.0).to(device)
+
+
+                order_loss = torch.tensor(0.0).to(device)
+                if args.order_coef > 0:
+                    order_loss = agent.get_temporal_loss(
+                        lstm_output_flat, 
+                        b_dones[mb_inds], 
+                        args.num_steps
+                    )
+
                 # Total loss
                 loss = (
                     pg_loss 
@@ -418,6 +432,7 @@ if __name__ == "__main__":
                     + (args.mask_coef * mask_loss) 
                     + (args.time_coef * time_loss)
                     + (args.pred_coef * prediction_loss)
+                    + (args.order_coef * order_loss)
                 )
 
                 optimizer.zero_grad()
@@ -441,6 +456,8 @@ if __name__ == "__main__":
                 writer.add_scalar("losses/time_loss", time_loss.item(), global_step)
             if args.pred_coef > 0:
                 writer.add_scalar("losses/prediction_loss", prediction_loss.item(), global_step)
+            if args.order_coef > 0:
+                writer.add_scalar("losses/order_loss", order_loss.item(), global_step)
             writer.add_scalar("charts/SPS", SPS, global_step)
             print(f"SPS: {SPS}")
 

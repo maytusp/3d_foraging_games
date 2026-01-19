@@ -1,13 +1,12 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torchvision.transforms as T
+from torch.distributions.categorical import Categorical
 
 import numpy as np
 import os
 from typing import Callable
-
-from torch.distributions.categorical import Categorical
-
 
 from efficientnet_pytorch import EfficientNet
 
@@ -23,9 +22,10 @@ class PPOLSTMCommAgent(nn.Module):
     Observations: [image, location, message]
     '''
     def __init__(self, num_actions=3, n_words=4, embedding_size=64, num_channels=3, image_size=96, max_duration=12,
-    pretrained_embedding=False, freeze_embedding=False, embedding_path=None):
+    pretrained_embedding=False, freeze_embedding=False, embedding_path=None, n_order=6):
         super().__init__()
         self.max_duration = max_duration # maximum spawn durations: initial training is 6 but we can extend to 12
+        self.n_order = n_order
         self.visual_dim = 128
         self.n_words = n_words
         self.embedding_size = embedding_size
@@ -108,6 +108,9 @@ class PPOLSTMCommAgent(nn.Module):
                 nn.ReLU(),
                 nn.Linear(self.hidden_dim, self.input_dim)
             )
+        # temporal order prediction 
+        self.order_head = layer_init(nn.Linear(self.hidden_dim, self.n_order), std=0.01)
+
     def _get_features(self, input):
         """
         Helper to extract features from raw observations.
@@ -193,10 +196,59 @@ class PPOLSTMCommAgent(nn.Module):
             mask_logits,
             time_logits,
             predicted_next_features,
-            lstm_state
+            lstm_state,
+            hidden
         )
-        
 
+    def get_temporal_loss(self, hidden_flat, dones_flat, num_steps):
+        """
+        hidden_flat: (B * S, H)
+        dones_flat: (B * S)
+        num_steps: The length of the temporal sequence (T)
+        """
+        total_samples, hidden_dim = hidden_flat.shape
+        batch_size = total_samples // num_steps
+        
+        # reshape both tensors to (B, T, H) and (B, T)
+        h_seq_all = hidden_flat.view(num_steps, batch_size, hidden_dim).permute(1, 0, 2)
+        d_seq_all = dones_flat.view(num_steps, batch_size).permute(1, 0)
+        
+        if num_steps < self.n_order:
+            return torch.tensor(0.0, device=hidden_flat.device)
+
+        # create sliding windows
+        h_windows = h_seq_all.unfold(1, self.n_order, 1)  # (B, Num_Windows, H, N_order)
+        d_windows = d_seq_all.unfold(1, self.n_order, 1)
+
+        # Rearrange dimensions to prepare for batch processing
+        # We want: (Total_Windows, N_order, Hidden)
+        # h_windows permute: (B, Num_Windows, N_order, H) -> flatten first two dims
+        h_windows = h_windows.permute(0, 1, 3, 2).reshape(-1, self.n_order, hidden_dim)
+        d_windows = d_windows.reshape(-1, self.n_order)
+
+        # We use done flag to avoid two episodes contaminating in a single slice
+        transitions_dones = d_windows[:, :-1] 
+        valid_mask = ~torch.any(transitions_dones > 0.5, dim=1)
+
+        if valid_mask.sum() == 0:
+            return torch.tensor(0.0, device=hidden_flat.device)
+
+        # Filter Valid Sequences
+        H_valid = h_windows[valid_mask] # (Valid_Windows, N_order, H)
+        current_bs = H_valid.shape[0]
+
+        # Permute hidden state's order
+        random_inds = torch.rand(current_bs, self.n_order, device=hidden_flat.device).argsort(dim=1)
+        batch_indices = torch.arange(current_bs, device=hidden_flat.device).unsqueeze(1).expand(-1, self.n_order)
+        H_perm = H_valid[batch_indices, random_inds, :]
+
+        # predict hidden state's order
+        pred_logits = self.order_head(H_perm)
+
+        # compute order_loss
+        order_loss = F.cross_entropy(pred_logits.reshape(-1, self.n_order), random_inds.reshape(-1))
+        
+        return order_loss
 
 class EfficientNetEncoder(nn.Module):
     '''
