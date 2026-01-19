@@ -49,10 +49,14 @@ class Args:
     ent_coef: float = 0.01
     m_ent_coef: float = 0.002
     vf_coef: float = 0.5
+
     mask_coef: float = 0.0 # orig 0.2
+
+    # note: time prediction is cheating. We just use it as a baseline.
     time_coef: float = 0.0 # orig 0.2
+
     # self-prediction
-    pred_coef: float = 1.0
+    pred_coef: float = 0.0
 
     # order prediction
     order_coef: float = 1.0
@@ -102,7 +106,7 @@ class Args:
     
     torch_deterministic: bool = True
     cuda: bool = True
-    track: bool = False
+    track: bool = True
     wandb_project_name: str = "temporalg_3d_silence_token"
     wandb_entity: str = "maytusp"
 
