@@ -289,7 +289,7 @@ class TemporalGEnv:
         # --- UPDATE COMMUNICATION MASK ---
         comm_mask = self._update_communication_logic()
 
-        img_obs, loc_obs, time_obs = self._get_obs()
+        img_obs, loc_obs, spawn_time_obs, time_step_obs = self._get_obs()
         
         d_target = self._get_dists(self.items[self.target_idx])
         d_distractor = self._get_dists(self.items[self.distractor_idx])
@@ -319,7 +319,7 @@ class TemporalGEnv:
                     reward = 0.10
 
         # Note: Added comm_mask to return values
-        return img_obs, loc_obs, time_obs, reward, done, status, comm_mask
+        return img_obs, loc_obs, spawn_time_obs, time_step_obs, reward, done, status, comm_mask
 
     def _apply_velocity_momentarily(self, agent_id, action):
         lin_v = self.LIN_SPEED if action == 1 else 0
@@ -367,6 +367,9 @@ class TemporalGEnv:
             t1 = self.spawn_time_target
             
         return [t0, t1]
+    
+    def _get_time_steps(self):
+        return [self.step_count] * 2
         
     def _check_spawns(self):
         spawned_item_idx = None
@@ -449,6 +452,7 @@ class TemporalGEnv:
         img_obs = []
         loc_obs = []
         time_labels = self._get_time_labels()
+        time_steps = self._get_time_steps()
         for agent_id, agent in enumerate(self.agents):
             pos, orn = p.getBasePositionAndOrientation(agent)
             r = np.array(p.getMatrixFromQuaternion(orn)).reshape(3,3)
@@ -488,7 +492,7 @@ class TemporalGEnv:
             img_obs.append(rgb_img)
         # print(f"agent 0 is at (x,y,dx,dy) = {loc_obs[0]}")
         # print(f"agent 1 is at (x,y,dx,dy) = {loc_obs[1]}")
-        return img_obs, loc_obs, time_labels
+        return img_obs, loc_obs, time_labels, time_steps
 
 
 class PettingZooWrapper(ParallelEnv):
@@ -506,7 +510,8 @@ class PettingZooWrapper(ParallelEnv):
                 "image": spaces.Box(low=0, high=255, shape=(3, self.env.IMAGE_SIZE, self.env.IMAGE_SIZE), dtype=np.uint8),
                 "location": spaces.Box(low=-np.inf, high=np.inf, shape=(4,), dtype=np.float32),
                 "mask": spaces.Box(low=0, high=1, shape=(1,), dtype=np.int32),
-                "time": spaces.Box(low=1, high=self.FREEZE_STEPS, shape=(1,), dtype=np.int32)
+                "spawn_time": spaces.Box(low=1, high=self.FREEZE_STEPS, shape=(1,), dtype=np.int32),
+                "time_step": spaces.Box(low=1, high=1000, shape=(1,), dtype=np.int32)
             }) for agent in self.possible_agents
         }
         
@@ -520,7 +525,7 @@ class PettingZooWrapper(ParallelEnv):
     def action_space(self):
         return lambda agent: self.action_space_map[agent]
 
-    def _process_obs(self, img_obs_list, loc_obs_list, time_obs_list):
+    def _process_obs(self, img_obs_list, loc_obs_list, spawn_time_obs_list, time_step_obs_list):
         observations = {}
         for i, agent in enumerate(self.agents):
             raw_img = img_obs_list[i]
@@ -531,7 +536,8 @@ class PettingZooWrapper(ParallelEnv):
                 "image": image_tensor,
                 "location": loc_obs_list[i],
                 "mask": np.array([self.comm_mask], dtype=np.int32),
-                "time": np.array([time_obs_list[i]], dtype=np.int32) 
+                "spawn_time": np.array([spawn_time_obs_list[i]], dtype=np.int32),
+                "time_step": np.array([time_step_obs_list[i]], dtype=np.int32),
             }
         return observations
 
@@ -540,7 +546,7 @@ class PettingZooWrapper(ParallelEnv):
             random.seed(seed)
             np.random.seed(seed)
         
-        img_obs, loc_obs, time_obs = self.env.reset()
+        img_obs, loc_obs, spawn_time_obs, time_step_obs = self.env.reset()
         
         self.agents = self.possible_agents[:]
         self.comm_mask = self.env.comm_mask
@@ -548,7 +554,7 @@ class PettingZooWrapper(ParallelEnv):
         self.episode_return = {a: 0.0 for a in self.agents}
         self.episode_length = {a: 0 for a in self.agents}
         
-        observations = self._process_obs(img_obs, loc_obs, time_obs)
+        observations = self._process_obs(img_obs, loc_obs, spawn_time_obs, time_step_obs)
         infos = {agent: {} for agent in self.agents}
         
         return observations, infos
@@ -565,10 +571,10 @@ class PettingZooWrapper(ParallelEnv):
             pass
         else:
             raise TypeError(f"Expected dict or list actions, got {type(actions)}")
-        img_obs, loc_obs, time_obs, reward, done, status, comm_mask = self.env.step(actions)
+        img_obs, loc_obs, spawn_time_obs, time_step_obs, reward, done, status, comm_mask = self.env.step(actions)
         self.comm_mask = comm_mask
 
-        observations = self._process_obs(img_obs, loc_obs, time_obs)
+        observations = self._process_obs(img_obs, loc_obs, spawn_time_obs, time_step_obs)
         rewards = {}
         terminations = {}
         truncations = {}

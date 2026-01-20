@@ -116,7 +116,7 @@ class Args:
     torch_deterministic: bool = True
     cuda: bool = True
     track: bool = True
-    wandb_project_name: str = "temporalg_3d_silence_token"
+    wandb_project_name: str = "temporalg_3d_flash"
     wandb_entity: str = "maytusp"
 
 if __name__ == "__main__":
