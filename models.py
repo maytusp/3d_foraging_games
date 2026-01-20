@@ -5,10 +5,13 @@ import torchvision.transforms as T
 from torch.distributions.categorical import Categorical
 
 import numpy as np
+import math
 import os
 from typing import Callable
 
 from efficientnet_pytorch import EfficientNet
+
+
 
 
 def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
@@ -16,25 +19,55 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     torch.nn.init.constant_(layer.bias, bias_const)
     return layer
 
+
+class PositionalEncoding(nn.Module):
+    def __init__(self, d_model, max_len=1000):
+        super().__init__()
+        # Create a long enough 'pe' matrix
+        pe = torch.zeros(max_len, d_model)
+        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
+        
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+        
+        # Register as buffer (not a learnable parameter, but part of state_dict)
+        self.register_buffer('pe', pe)
+
+    def forward(self, x, t):
+        """
+        x: Hidden state tensor (Batch, Hidden_Dim)
+        t: Time step indices (Batch,)
+        """
+        t = t.clamp(max=self.pe.size(0)-1) 
+        return x + self.pe[t]
+
 class PPOLSTMCommAgent(nn.Module):
     '''
     Agent with communication
     Observations: [image, location, message]
     '''
     def __init__(self, num_actions=3, n_words=4, embedding_size=64, num_channels=3, image_size=96, max_duration=12,
-    pretrained_embedding=False, freeze_embedding=False, embedding_path=None, n_order=6):
+    pretrained_embedding=False, freeze_embedding=False, embedding_path=None, n_order=6, use_pe=False, use_time_enc=False):
         super().__init__()
         self.max_duration = max_duration # maximum spawn durations: initial training is 6 but we can extend to 12
         self.n_order = n_order
+        self.use_pe = use_pe # apply positional encoding to hidden state (position = time step)
+        self.use_time_enc = use_time_enc # use time encoder to project a time step to embedding vector
+
         self.visual_dim = 128
         self.n_words = n_words
         self.embedding_size = embedding_size
         self.num_channels = num_channels
         self.image_size = image_size
         self.loc_dim = 64 # location encoder output size
+        if self.use_time_enc:
+            self.time_dim = 64 # time encoder output size (if used)
+        else:
+            self.time_dim = 0
 
         # RNN hyperparameters
-        self.input_dim = self.visual_dim + self.loc_dim + self.embedding_size # RNN input dim
+        self.input_dim = self.visual_dim + self.loc_dim + self.time_dim + self.embedding_size # RNN input dim
         self.hidden_dim = 256 # RNN hidden dim
         
 
@@ -85,8 +118,12 @@ class PPOLSTMCommAgent(nn.Module):
                 param.requires_grad = False
                 
         self.location_encoder = nn.Linear(4, self.loc_dim) # Input size 4 (x, y , dx, dy)
-        
 
+
+        if self.use_time_enc:
+            self.time_encoder = nn.Embedding(1000, self.time_dim)
+
+        self.pos_encoding = PositionalEncoding(self.hidden_dim, max_len=1000) # encoding time as position
         self.lstm = nn.LSTM(self.input_dim, self.hidden_dim)
         
         for name, param in self.lstm.named_parameters():
@@ -111,12 +148,13 @@ class PPOLSTMCommAgent(nn.Module):
         # temporal order prediction 
         self.order_head = layer_init(nn.Linear(self.hidden_dim, self.n_order), std=0.01)
 
+
     def _get_features(self, input):
         """
         Helper to extract features from raw observations.
         Used for both the current step (input to LSTM) and the next step (target for predictor).
         """
-        image, location, message = input
+        image, location, message, time_step = input
 
         x = image / 255.0
         x = self.normalize(x)
@@ -126,13 +164,17 @@ class PPOLSTMCommAgent(nn.Module):
 
         message_feat = self.message_encoder(message) 
         message_feat = message_feat.view(-1, self.embedding_size)
-
-        features = torch.cat((image_feat, location_feat, message_feat), dim=1)
+        if self.use_time_enc:
+            time_step_feat = self.time_encoder(time_step)
+            features = torch.cat((image_feat, location_feat, message_feat, time_step_feat), dim=1)
+        else:
+            features = torch.cat((image_feat, location_feat, message_feat), dim=1)
         return features
 
     def get_states(self, input, lstm_state, done, tracks=None):
         batch_size = lstm_state[0].shape[1]
         hidden = self._get_features(input)
+        _, _, _, time_steps = input
     
         # LSTM logic
         hidden = hidden.reshape((-1, batch_size, self.lstm.input_size))
@@ -150,7 +192,11 @@ class PPOLSTMCommAgent(nn.Module):
                 ),
             )
             new_hidden += [h]
+
         new_hidden = torch.flatten(torch.cat(new_hidden), 0, 1)
+        if self.use_pe:
+            new_hidden = self.pos_encoding(new_hidden, time_steps.long())
+        
         return new_hidden, lstm_state
 
     def get_value(self, x, lstm_state, done):
@@ -158,8 +204,8 @@ class PPOLSTMCommAgent(nn.Module):
         return self.critic(hidden)
 
     def get_action_and_value(self, input, lstm_state, done, action=None, message=None, tracks=None):
-        image, location, received_message = input
-        hidden, lstm_state = self.get_states((image, location, received_message), lstm_state, done, tracks)
+        image, location, received_message, time_steps = input
+        hidden, lstm_state = self.get_states((image, location, received_message, time_steps), lstm_state, done, tracks)
 
         action_logits = self.actor(hidden)
         action_probs = Categorical(logits=action_logits)

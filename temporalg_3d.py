@@ -25,7 +25,7 @@ class TemporalGEnv:
         
         self.dt = 1./30.  # Faster physics tick
         self.ACTION_DURATION = 0.1 # Slightly longer action
-        self.ROBOT_SCALE = 0.6 
+        self.ROBOT_SCALE = 0.3
 
         self.FORWARD_DIST = 0.5
         self.TARGET_ANGLE = 45
@@ -36,8 +36,8 @@ class TemporalGEnv:
         self.FREEZE_STEPS = 6
         self.TARGET_SIZE = 0.3
         self.COLLECT_DIST = 1.0
-        self.ARENA_WIDTH = 4
-        self.ARENA_HEIGHT = 4
+        self.ARENA_WIDTH = 6
+        self.ARENA_HEIGHT = 6
 
         self.IMAGE_SIZE = image_size
 
@@ -47,6 +47,14 @@ class TemporalGEnv:
         self.agent1 = None
         self.door_id = None
         self.middle_wall_ids = []
+
+        self.SPAWN_FLASH_STEPS = 1   # how many env-steps the cue lasts
+        self.flash_remaining = [0, 0]  # per-agent countdown
+        self.flash_tint = [
+            np.array([60, 0, 0], dtype=np.float32),   # agent0 sees item0 -> red tint
+            np.array([60, 0, 0], dtype=np.float32),   # agent1 sees item1 -> blue tint
+        ]
+        self.flash_gain = 3  # brightness multiplier
 
     def _setup_pybullet(self):
         """Initialise PyBullet"""
@@ -89,6 +97,7 @@ class TemporalGEnv:
 
 
     def reset(self):
+        self.flash_remaining = [0, 0]
         reconnect = False
         if self.client is None:
             reconnect = True
@@ -113,10 +122,10 @@ class TemporalGEnv:
         self._create_random_door_and_walls(self.ARENA_WIDTH)
 
         # Teleport Agents
-        rand_x0, rand_y0 = random.uniform(-1.2, 1.2), random.uniform(-1.8, -0.8)
+        rand_x0, rand_y0 = random.uniform(-2, 2), random.uniform(-2.7, -2)
         self._teleport_agent(self.agent0, [rand_x0, rand_y0], yaw=1.57)
         
-        rand_x1, rand_y1 = random.uniform(-1.2, 1.2), random.uniform(1.8, 0.8)
+        rand_x1, rand_y1 = random.uniform(-2, 2), random.uniform(2.7, 2)
         self._teleport_agent(self.agent1, [rand_x1, rand_y1], yaw=-1.57)
 
         # Reset Items
@@ -251,6 +260,9 @@ class TemporalGEnv:
         return rgb_array
 
     def step(self, actions):
+        for i in range(2):
+            if self.flash_remaining[i] > 0:
+                self.flash_remaining[i] -= 1
         if self.step_count < self.FREEZE_STEPS:
             actions = [0, 0]
         self.step_count += 1
@@ -273,7 +285,7 @@ class TemporalGEnv:
             p.resetBaseVelocity(agent_id, [0,0,0], [0,0,0])
 
         self._check_spawns()
-        
+
         # --- UPDATE COMMUNICATION MASK ---
         comm_mask = self._update_communication_logic()
 
@@ -357,10 +369,21 @@ class TemporalGEnv:
         return [t0, t1]
         
     def _check_spawns(self):
+        spawned_item_idx = None
+
         if self.step_count == self.spawn_time_target and not self.target_spawned:
-            self._pop_item_up(self.items[self.target_idx]); self.target_spawned = True  
+            spawned_item_idx = self.target_idx
+            self._pop_item_up(self.items[self.target_idx])
+            self.target_spawned = True
+
         if self.step_count == self.spawn_time_distractor and not self.distractor_spawned:
-            self._pop_item_up(self.items[self.distractor_idx]); self.distractor_spawned = True
+            spawned_item_idx = self.distractor_idx
+            self._pop_item_up(self.items[self.distractor_idx])
+            self.distractor_spawned = True
+
+        if spawned_item_idx is not None:
+            self.flash_remaining[spawned_item_idx] = self.SPAWN_FLASH_STEPS
+
 
     def _load_faced_agent(self, pos, eye_color):
         """
@@ -375,7 +398,7 @@ class TemporalGEnv:
 
         # 2. Eye Params (The front face)
         # Sits slightly in front (y=0.2) and up
-        eye_half = [0.15, 0.02, 0.1] 
+        eye_half = [0.02, 0.2, 0.02] 
         eye_vis = p.createVisualShape(p.GEOM_BOX, halfExtents=eye_half, rgbaColor=eye_color)
 
         # 3. Create One MultiBody
@@ -389,7 +412,7 @@ class TemporalGEnv:
             linkMasses=[0.01],
             linkCollisionShapeIndices=[-1], # No collision for eye
             linkVisualShapeIndices=[eye_vis],
-            linkPositions=[[0, 0.22, 0.15]], # 0.2 (body) + 0.02 (eye) = 0.22 forward
+            linkPositions=[[0, 0.22, 0.3]], # 0.2 (body) + 0.02 (eye) = 0.22 forward
             linkOrientations=[[0,0,0,1]],
             linkInertialFramePositions=[[0,0,0]],
             linkInertialFrameOrientations=[[0,0,0,1]],
@@ -436,8 +459,8 @@ class TemporalGEnv:
             loc_obs.append(np.array([x, y, dx, dy], dtype=np.float32))
             
             # --- 3. Vision ---
-            offset_eye = np.array([0, -0.2, 0.7]) * self.ROBOT_SCALE
-            offset_target = np.array([0, 1.0, 0.7]) * self.ROBOT_SCALE
+            offset_eye = np.array([0, 0.0, 0.05]) * self.ROBOT_SCALE
+            offset_target = np.array([0, 1.0, 0.05]) * self.ROBOT_SCALE
             
             cam_eye = np.array(pos) + r.dot(offset_eye)
             cam_target = np.array(pos) + r.dot(offset_target)
@@ -457,7 +480,11 @@ class TemporalGEnv:
 
             rgb_arr = np.array(rgb, dtype=np.uint8).reshape(self.IMAGE_SIZE, self.IMAGE_SIZE, 4)
             rgb_img = rgb_arr[:, :, :3] # Drop Alpha, keep RGB. No cv2 conversion needed if PyBullet returns RGB.
-            
+            if self.flash_remaining[agent_id] > 0:
+                img_f = rgb_img.astype(np.float32)
+                img_f = img_f * self.flash_gain + self.flash_tint[agent_id]
+                rgb_img = np.clip(img_f, 0, 255).astype(np.uint8)
+
             img_obs.append(rgb_img)
         # print(f"agent 0 is at (x,y,dx,dy) = {loc_obs[0]}")
         # print(f"agent 1 is at (x,y,dx,dy) = {loc_obs[1]}")

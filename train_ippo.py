@@ -26,15 +26,16 @@ def extract_dict(obs_batch, device):
     obs = torch.tensor(obs_batch['image']).to(device).float()
     locs = torch.tensor(obs_batch['location']).to(device).float()
     masks = torch.tensor(obs_batch['mask']).to(device).squeeze(-1)
-    times = torch.tensor(obs_batch['time']).to(device).squeeze(-1).long()
+    spawn_times = torch.tensor(obs_batch['spawn_time']).to(device).squeeze(-1).long()
+    time_steps = torch.tensor(obs_batch['time_step']).to(device).squeeze(-1).long()
         
-    return obs, locs, masks, times
+    return obs, locs, masks, spawn_times, time_steps
 
 @dataclass
 class Args:
     seed: int = 1
     env_id: str = "TemporalG-v1"
-    total_timesteps: int = int(3e8) 
+    total_timesteps: int = int(2e8) 
     learning_rate: float = 2.5e-4
     num_envs: int = 8 # I don't know why using num_envs = 4 seems to converge better
     num_steps: int = 128
@@ -59,8 +60,14 @@ class Args:
     pred_coef: float = 0.0
 
     # order prediction
-    order_coef: float = 1.0
+    order_coef: float = 0.0
     n_order: int = 6
+
+    # use positional encoding
+    use_pe: bool = False
+
+    # use time step encoder (like location encoder)
+    use_time_enc: bool = True
 
     # Embedding Option
     pretrained_embedding: bool = False
@@ -80,9 +87,11 @@ class Args:
                             "11": "auxMaskTime_"}
     aux_key = f"{int(mask_coef > 0)}{int(time_coef > 0)}"
     aux_loss_prefix = aux_loss_prefix_dict[aux_key]
-    self_pred_prefix = f"selfpred_{pred_coef}_" if pred_coef > 0 else ""
+    self_pred_prefix = f"selfpred{pred_coef}_" if pred_coef > 0 else ""
     order_pred_prefix = f"order{order_coef}_" if order_coef > 0 else ""
-    
+    pe_prefix = f"pe_" if use_pe else ""
+    time_enc_prefix = f"timeenc_" if use_time_enc else ""
+
     n_words = 4 # original is 4, we try 3 to match the pretrained temporalg version
     embedding_size = 64 # original is 64, we try 16 to test if it works for pretrained embedding from 2DTemporalG
     image_size = 48
@@ -96,8 +105,8 @@ class Args:
     minibatch_size: int = 0
     num_iterations: int = 0
     pretrained_path = None # "./checkpoints/pretrained_nav/model_step_201600000.pt"
-    
-    exp_name = f"ippo_ms{max_steps}_nenv8nb8_nw{n_words}_{aux_loss_prefix}{self_pred_prefix}{order_pred_prefix}seed{seed}{embedding_prefix}"
+    combined_prefix = f"{aux_loss_prefix}{self_pred_prefix}{order_pred_prefix}{pe_prefix}{time_enc_prefix}"
+    exp_name = f"ippo_ms{max_steps}_nenv8nb8_nw{n_words}_{combined_prefix}seed{seed}{embedding_prefix}"
     save_dir = f"checkpoints/train_from_scratch/{exp_name}"
     os.makedirs(save_dir, exist_ok=True)
     load_pretrained = False
@@ -161,6 +170,8 @@ if __name__ == "__main__":
                             pretrained_embedding=args.pretrained_embedding,
                             freeze_embedding=args.freeze_embedding,
                             embedding_path=args.embedding_path,
+                            use_pe=args.use_pe,
+                            use_time_enc=args.use_time_enc,
                             n_order=args.n_order).to(device) # <--- Pass n_order here
     if args.pretrained_path:
         print(f"Loading model from {args.pretrained_path}...")
@@ -179,7 +190,8 @@ if __name__ == "__main__":
     s_messages = torch.zeros((args.num_steps, total_agents), dtype=torch.int64).to(device)
     
     masks_store = torch.zeros((args.num_steps, total_agents), dtype=torch.int64).to(device)
-    times_store = torch.zeros((args.num_steps, total_agents), dtype=torch.int64).to(device)
+    spawn_times_store = torch.zeros((args.num_steps, total_agents), dtype=torch.int64).to(device)
+    time_steps_store = torch.zeros((args.num_steps, total_agents), dtype=torch.int64).to(device)
 
     actions = torch.zeros((args.num_steps, total_agents)).to(device)
     action_logprobs = torch.zeros((args.num_steps, total_agents)).to(device)
@@ -193,7 +205,7 @@ if __name__ == "__main__":
     
     # --- RESET ---
     next_obs_dict, _ = envs.reset(seed=args.seed)
-    next_obs, next_locs, next_masks, next_times = extract_dict(next_obs_dict, device)
+    next_obs, next_locs, next_masks, next_spawn_times, next_time_steps = extract_dict(next_obs_dict, device)
     
     # Initialize "Last Received Message" buffer (t=0, silence)
     next_r_messages = torch.zeros(total_agents, dtype=torch.int64).to(device)
@@ -220,7 +232,8 @@ if __name__ == "__main__":
             obs[step] = next_obs
             raw_locs[step] = next_locs
             masks_store[step] = next_masks
-            times_store[step] = next_times
+            spawn_times_store[step] = next_spawn_times
+            time_steps_store[step] = next_time_steps
             r_messages[step] = next_r_messages # Input for this step
             dones[step] = next_done
 
@@ -228,7 +241,7 @@ if __name__ == "__main__":
             # We pass 'next_r_messages' which was calculated at the end of the PREVIOUS step
             with torch.no_grad():
                 action, action_logprob, _, s_message, message_logprob, _, value, _, _, _, next_lstm_state, _ = agent.get_action_and_value(
-                    (next_obs, next_locs, next_r_messages), 
+                    (next_obs, next_locs, next_r_messages, next_time_steps), 
                     next_lstm_state, 
                     next_done
                 )
@@ -244,7 +257,7 @@ if __name__ == "__main__":
             next_obs_dict, reward, terminations, truncations, infos = envs.step(env_action)
             
             # Extract next observation
-            next_obs, next_locs, next_masks, next_times = extract_dict(next_obs_dict, device)
+            next_obs, next_locs, next_masks, next_spawn_times, next_time_steps = extract_dict(next_obs_dict, device)
             
             next_done_np = np.logical_or(terminations, truncations)
             rewards[step] = torch.tensor(reward).to(device).view(-1)
@@ -277,7 +290,7 @@ if __name__ == "__main__":
         # Bootstrapping (Using next_r_messages for value estimation of terminal state)
         with torch.no_grad():
             next_value = agent.get_value(
-                (next_obs, next_locs, next_r_messages),
+                (next_obs, next_locs, next_r_messages, next_time_steps),
                 next_lstm_state,
                 next_done,
             ).reshape(1, -1)
@@ -308,7 +321,8 @@ if __name__ == "__main__":
         b_values = values.reshape(-1)
 
         b_masks = masks_store.reshape(-1)
-        b_times = times_store.reshape(-1)
+        b_spawn_times = spawn_times_store.reshape(-1)
+        b_time_steps = time_steps_store.reshape(-1)
 
         if args.pred_coef > 0:
             targets_obs = torch.cat((obs[1:], next_obs.unsqueeze(0)), dim=0)
@@ -335,9 +349,9 @@ if __name__ == "__main__":
                 mbenvinds = envinds[start:end]
                 mb_inds = flatinds[:, mbenvinds].ravel()
                 mb_masks = b_masks[mb_inds]
-                mb_times = b_times[mb_inds]
+                mb_spawn_times = b_spawn_times[mb_inds]
                 _, new_action_logprob, action_entropy, _, new_message_logprob, message_entropy, newvalue, mask_logits, time_logits, pred_next_features, _, lstm_output_flat = agent.get_action_and_value(
-                                                    (b_obs[mb_inds], b_locs[mb_inds], b_r_messages[mb_inds]),
+                                                    (b_obs[mb_inds], b_locs[mb_inds], b_r_messages[mb_inds], b_time_steps[mb_inds]),
                                                     (initial_lstm_state[0][:, mbenvinds], initial_lstm_state[1][:, mbenvinds]),
                                                     b_dones[mb_inds],
                                                     b_actions.long()[mb_inds],
@@ -395,7 +409,7 @@ if __name__ == "__main__":
                 if args.time_coef > 0:
                     time_loss_elementwise = nn.functional.cross_entropy(
                         time_logits, 
-                        mb_times.long(), 
+                        mb_spawn_times.long(), 
                         reduction='none'
                     )
                     masked_time_loss = time_loss_elementwise * mb_masks.float()
