@@ -125,10 +125,15 @@ class PPOLSTMCommAgent(nn.Module):
 
         self.pos_encoding = PositionalEncoding(self.hidden_dim, max_len=1000) # encoding time as position
         self.lstm = nn.LSTM(self.input_dim, self.hidden_dim)
-        
+        self.input_norm = nn.LayerNorm(self.input_dim)
         for name, param in self.lstm.named_parameters():
             if "bias" in name:
-                nn.init.constant_(param, 0)
+                # The bias tensor in PyTorch is concatenated [Input, Forget, Cell, Output]
+                # We need to slice it to access the Forget Gate portion.
+                n = self.hidden_dim
+                nn.init.constant_(param, 0.0)
+                param.data[n:2*n].fill_(1.0) 
+                
             elif "weight" in name:
                 nn.init.orthogonal_(param, 1.0)
 
@@ -174,6 +179,7 @@ class PPOLSTMCommAgent(nn.Module):
     def get_states(self, input, lstm_state, done, tracks=None):
         batch_size = lstm_state[0].shape[1]
         hidden = self._get_features(input)
+        hidden = self.input_norm(hidden)
         _, _, _, time_steps = input
     
         # LSTM logic

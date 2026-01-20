@@ -61,7 +61,7 @@ class Args:
 
     # order prediction
     order_coef: float = 0.0
-    n_order: int = 6
+    n_order: int = 12
 
     # use positional encoding
     use_pe: bool = False
@@ -95,7 +95,7 @@ class Args:
     n_words = 4 # original is 4, we try 3 to match the pretrained temporalg version
     embedding_size = 64 # original is 64, we try 16 to test if it works for pretrained embedding from 2DTemporalG
     image_size = 48
-    max_steps = 32
+    max_steps = 24
     mask_message_grad: bool = True
     collect_distractor: bool = True # If agents cannot collect distractor, communication may not be necessary
     
@@ -420,7 +420,7 @@ if __name__ == "__main__":
                 if args.pred_coef > 0:
                     with torch.no_grad():
                         target_features = agent._get_features(
-                                            (b_targets_obs[mb_inds], b_targets_locs[mb_inds], b_targets_msgs[mb_inds])
+                                            (b_targets_obs[mb_inds], b_targets_locs[mb_inds], b_targets_msgs[mb_inds], b_time_steps[mb_inds])
                                             )
                 
                     raw_pred_loss = (pred_next_features - target_features) ** 2
