@@ -51,10 +51,10 @@ class TemporalGEnv:
         self.SPAWN_FLASH_STEPS = 1   # how many env-steps the cue lasts
         self.flash_remaining = [0, 0]  # per-agent countdown
         self.flash_tint = [
-            np.array([60, 0, 0], dtype=np.float32),   # agent0 sees item0 -> red tint
-            np.array([60, 0, 0], dtype=np.float32),   # agent1 sees item1 -> blue tint
+            np.array([0, 60, 0], dtype=np.float32),   # agent0 sees item0 -> red tint
+            np.array([0, 60, 0], dtype=np.float32),   # agent1 sees item1 -> blue tint
         ]
-        self.flash_gain = 3  # brightness multiplier
+        self.flash_gain = 0.3  # brightness multiplier
 
     def _setup_pybullet(self):
         """Initialise PyBullet"""
