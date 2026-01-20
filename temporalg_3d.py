@@ -36,8 +36,8 @@ class TemporalGEnv:
         self.FREEZE_STEPS = 6
         self.TARGET_SIZE = 0.3
         self.COLLECT_DIST = 1.0
-        self.ARENA_WIDTH = 6
-        self.ARENA_HEIGHT = 6
+        self.ARENA_WIDTH = 4
+        self.ARENA_HEIGHT = 4
 
         self.IMAGE_SIZE = image_size
 
@@ -122,10 +122,10 @@ class TemporalGEnv:
         self._create_random_door_and_walls(self.ARENA_WIDTH)
 
         # Teleport Agents
-        rand_x0, rand_y0 = random.uniform(-2, 2), random.uniform(-2.7, -2)
+        rand_x0, rand_y0 = random.uniform(-1.2, 1.2), random.uniform(-1.8, -1.5)
         self._teleport_agent(self.agent0, [rand_x0, rand_y0], yaw=1.57)
         
-        rand_x1, rand_y1 = random.uniform(-2, 2), random.uniform(2.7, 2)
+        rand_x1, rand_y1 = random.uniform(-1.2, 1.2), random.uniform(1.8, 1.5)
         self._teleport_agent(self.agent1, [rand_x1, rand_y1], yaw=-1.57)
 
         # Reset Items
