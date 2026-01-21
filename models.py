@@ -48,26 +48,35 @@ class PPOLSTMCommAgent(nn.Module):
     Observations: [image, location, message]
     '''
     def __init__(self, num_actions=3, n_words=4, embedding_size=64, num_channels=3, image_size=96, max_duration=12,
-    pretrained_embedding=False, freeze_embedding=False, embedding_path=None, n_order=6, use_pe=False, use_time_enc=False):
+    pretrained_embedding=False, freeze_embedding=False, embedding_path=None, n_order=6, use_pe=False, 
+    use_time_enc=False, use_event=False, max_event_step=6):
         super().__init__()
         self.max_duration = max_duration # maximum spawn durations: initial training is 6 but we can extend to 12
         self.n_order = n_order
         self.use_pe = use_pe # apply positional encoding to hidden state (position = time step)
         self.use_time_enc = use_time_enc # use time encoder to project a time step to embedding vector
-
+        self.use_event = use_event
+        self.max_event_step = max_event_step
         self.visual_dim = 128
         self.n_words = n_words
         self.embedding_size = embedding_size
         self.num_channels = num_channels
         self.image_size = image_size
         self.loc_dim = 64 # location encoder output size
+
         if self.use_time_enc:
             self.time_dim = 64 # time encoder output size (if used)
         else:
             self.time_dim = 0
 
+        if self.use_event:
+            self.event_embed_dim = 16
+            self.event_encoder = nn.Linear(1, self.event_embed_dim) # Takes scalar 0.0 or 1.0
+        else:
+            self.event_embed_dim = 0
+
         # RNN hyperparameters
-        self.input_dim = self.visual_dim + self.loc_dim + self.time_dim + self.embedding_size # RNN input dim
+        self.input_dim = self.visual_dim + self.loc_dim + self.time_dim + self.event_embed_dim + self.embedding_size # RNN input dim
         self.hidden_dim = 256 # RNN hidden dim
         
 
@@ -140,9 +149,21 @@ class PPOLSTMCommAgent(nn.Module):
         self.actor = layer_init(nn.Linear(self.hidden_dim, num_actions), std=0.01)
         self.critic = layer_init(nn.Linear(self.hidden_dim, 1), std=1)
         self.message_head = layer_init(nn.Linear(self.hidden_dim, n_words), std=0.01)
+        
+        self.message_head = nn.Sequential(
+            layer_init(nn.Linear(self.hidden_dim, self.hidden_dim // 4), std=0.01),
+            nn.ReLU(),
+            layer_init(nn.Linear(self.hidden_dim // 4, self.n_words), std=0.01)
+        )
 
         self.mask_head = layer_init(nn.Linear(self.hidden_dim, 2), std=0.01)
         self.time_head = layer_init(nn.Linear(self.hidden_dim, self.max_duration), std=0.01)
+
+        if self.use_event:
+            self.event_pred_head = layer_init(nn.Linear(self.hidden_dim, self.max_event_step + 1), std=0.01)
+        else:
+            self.event_pred_head = None
+
 
         # self-prediction head: predict the next latent state
         self.predictor = nn.Sequential(
@@ -159,7 +180,7 @@ class PPOLSTMCommAgent(nn.Module):
         Helper to extract features from raw observations.
         Used for both the current step (input to LSTM) and the next step (target for predictor).
         """
-        image, location, message, time_step = input
+        image, location, message, time_step, event_signal = input
 
         x = image / 255.0
         x = self.normalize(x)
@@ -169,9 +190,13 @@ class PPOLSTMCommAgent(nn.Module):
 
         message_feat = self.message_encoder(message) 
         message_feat = message_feat.view(-1, self.embedding_size)
+
         if self.use_time_enc:
             time_step_feat = self.time_encoder(time_step)
             features = torch.cat((image_feat, location_feat, message_feat, time_step_feat), dim=1)
+        elif self.use_event:
+            event_feat = self.event_encoder(event_signal.float().unsqueeze(-1))
+            features = torch.cat((image_feat, location_feat, message_feat, event_feat), dim=1)
         else:
             features = torch.cat((image_feat, location_feat, message_feat), dim=1)
         return features
@@ -180,7 +205,7 @@ class PPOLSTMCommAgent(nn.Module):
         batch_size = lstm_state[0].shape[1]
         hidden = self._get_features(input)
         hidden = self.input_norm(hidden)
-        _, _, _, time_steps = input
+        _, _, _, time_steps, _ = input
     
         # LSTM logic
         hidden = hidden.reshape((-1, batch_size, self.lstm.input_size))
@@ -210,8 +235,8 @@ class PPOLSTMCommAgent(nn.Module):
         return self.critic(hidden)
 
     def get_action_and_value(self, input, lstm_state, done, action=None, message=None, tracks=None):
-        image, location, received_message, time_steps = input
-        hidden, lstm_state = self.get_states((image, location, received_message, time_steps), lstm_state, done, tracks)
+        image, location, received_message, time_steps, event_signal = input
+        hidden, lstm_state = self.get_states((image, location, received_message, time_steps, event_signal), lstm_state, done, tracks)
 
         action_logits = self.actor(hidden)
         action_probs = Categorical(logits=action_logits)
@@ -237,6 +262,11 @@ class PPOLSTMCommAgent(nn.Module):
 
         predicted_next_features = self.predictor(hidden)
 
+        event_pred_logits = None
+        
+        if self.use_event:
+            event_pred_logits = self.event_pred_head(hidden)
+
         return (
             action, 
             action_probs.log_prob(action), 
@@ -248,6 +278,7 @@ class PPOLSTMCommAgent(nn.Module):
             mask_logits,
             time_logits,
             predicted_next_features,
+            event_pred_logits,
             lstm_state,
             hidden
         )
@@ -301,6 +332,18 @@ class PPOLSTMCommAgent(nn.Module):
         order_loss = F.cross_entropy(pred_logits.reshape(-1, self.n_order), random_inds.reshape(-1))
         
         return order_loss
+
+    def update_event_targets(self, current_targets, done_mask):
+        """
+        Refreshes event targets only for agents that have finished their episode.
+        """
+        batch_size = current_targets.shape[0]
+        device = current_targets.device
+        
+        new_random_targets = torch.randint(0, self.max_event_step + 1, (batch_size,), device=device)
+        updated_targets = torch.where(done_mask.bool(), new_random_targets, current_targets)
+        
+        return updated_targets
 
 class EfficientNetEncoder(nn.Module):
     '''

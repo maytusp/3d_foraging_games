@@ -37,8 +37,8 @@ class Args:
     env_id: str = "TemporalG-v1"
     total_timesteps: int = int(2e8) 
     learning_rate: float = 2.5e-4
-    num_envs: int = 8 # I don't know why using num_envs = 4 seems to converge better
-    num_steps: int = 128
+    num_envs: int = 8
+    num_steps: int = 32
     anneal_lr: bool = True
     gamma: float = 0.99
     gae_lambda: float = 0.95
@@ -61,21 +61,23 @@ class Args:
 
     # order prediction
     order_coef: float = 0.0
-    n_order: int = 12
+    n_order: int = 2
 
     # use positional encoding
-    use_pe: bool = False
+    use_pe: bool = True
 
     # use time step encoder (like location encoder)
-    use_time_enc: bool = True
+    use_time_enc: bool = False
+
+    # random event prediction
+    event_coef: float = 0.5
+    max_event_step = 6
 
     # Embedding Option
     pretrained_embedding: bool = False
     freeze_embedding: bool = False
     embedding_path: str = None # "./checkpoints/2d_temporalg/1B.pt"
     embedding_prefix = "" # "_pt_freeze"
-
-
 
     max_grad_norm: float = 0.5
     target_kl: float = None
@@ -91,11 +93,12 @@ class Args:
     order_pred_prefix = f"order{order_coef}_" if order_coef > 0 else ""
     pe_prefix = f"pe_" if use_pe else ""
     time_enc_prefix = f"timeenc_" if use_time_enc else ""
+    event_prefix = f"eventpred_" if event_coef > 0 else ""
 
     n_words = 4 # original is 4, we try 3 to match the pretrained temporalg version
     embedding_size = 64 # original is 64, we try 16 to test if it works for pretrained embedding from 2DTemporalG
     image_size = 48
-    max_steps = 24
+    max_steps = 32
     mask_message_grad: bool = True
     collect_distractor: bool = True # If agents cannot collect distractor, communication may not be necessary
     
@@ -105,7 +108,7 @@ class Args:
     minibatch_size: int = 0
     num_iterations: int = 0
     pretrained_path = None # "./checkpoints/pretrained_nav/model_step_201600000.pt"
-    combined_prefix = f"{aux_loss_prefix}{self_pred_prefix}{order_pred_prefix}{pe_prefix}{time_enc_prefix}"
+    combined_prefix = f"{aux_loss_prefix}{self_pred_prefix}{order_pred_prefix}{pe_prefix}{time_enc_prefix}{event_prefix}"
     exp_name = f"ippo_ms{max_steps}_nenv8nb8_nw{n_words}_{combined_prefix}seed{seed}{embedding_prefix}"
     save_dir = f"checkpoints/train_from_scratch/{exp_name}"
     os.makedirs(save_dir, exist_ok=True)
@@ -172,6 +175,8 @@ if __name__ == "__main__":
                             embedding_path=args.embedding_path,
                             use_pe=args.use_pe,
                             use_time_enc=args.use_time_enc,
+                            use_event=args.event_coef>0,
+                            max_event_step=args.max_event_step,
                             n_order=args.n_order).to(device) # <--- Pass n_order here
     if args.pretrained_path:
         print(f"Loading model from {args.pretrained_path}...")
@@ -193,6 +198,9 @@ if __name__ == "__main__":
     spawn_times_store = torch.zeros((args.num_steps, total_agents), dtype=torch.int64).to(device)
     time_steps_store = torch.zeros((args.num_steps, total_agents), dtype=torch.int64).to(device)
 
+    event_targets_store = torch.zeros((args.num_steps, total_agents), dtype=torch.int64).to(device) # integer, constant across episode
+    event_inputs_store = torch.zeros((args.num_steps, total_agents)).to(device) # 0 or 1
+    
     actions = torch.zeros((args.num_steps, total_agents)).to(device)
     action_logprobs = torch.zeros((args.num_steps, total_agents)).to(device)
     message_logprobs = torch.zeros((args.num_steps, total_agents)).to(device)
@@ -216,6 +224,10 @@ if __name__ == "__main__":
         torch.zeros(agent.lstm.num_layers, total_agents, agent.lstm.hidden_size).to(device),
     )
 
+    initial_done = torch.ones(total_agents, dtype=torch.bool).to(device)
+    dummy_targets = torch.zeros(total_agents, dtype=torch.long).to(device)
+    next_event_targets = agent.update_event_targets(dummy_targets, initial_done)
+
     running_ep_r = 0.0
     running_ep_l = 0.0
     running_num_ep = 0
@@ -237,11 +249,15 @@ if __name__ == "__main__":
             r_messages[step] = next_r_messages # Input for this step
             dones[step] = next_done
 
+            current_event_signal = (next_time_steps == next_event_targets).float()
+            event_targets_store[step] = next_event_targets
+            event_inputs_store[step] = current_event_signal
+
             # 1. Agent Forward Pass
             # We pass 'next_r_messages' which was calculated at the end of the PREVIOUS step
             with torch.no_grad():
-                action, action_logprob, _, s_message, message_logprob, _, value, _, _, _, next_lstm_state, _ = agent.get_action_and_value(
-                    (next_obs, next_locs, next_r_messages, next_time_steps), 
+                action, action_logprob, _, s_message, message_logprob, _, value, _, _, _, _, next_lstm_state, _ = agent.get_action_and_value(
+                    (next_obs, next_locs, next_r_messages, next_time_steps, current_event_signal), 
                     next_lstm_state, 
                     next_done
                 )
@@ -262,12 +278,13 @@ if __name__ == "__main__":
             next_done_np = np.logical_or(terminations, truncations)
             rewards[step] = torch.tensor(reward).to(device).view(-1)
             next_done = torch.Tensor(next_done_np).to(device)
+            next_event_targets = agent.update_event_targets(next_event_targets, next_done)
 
             #  MESSAGE EXCHANGE LOGIC
             s_msgs_reshaped = s_message.view(-1, 2)  # Shape: (Num_Envs, 2)
             swapped_msgs = torch.flip(s_msgs_reshaped, dims=[1]).flatten() # Shape: (Total_Agents,)
             next_r_messages = swapped_msgs * next_masks
-
+            
             if (global_step // total_agents) % args.save_frequency == 0:
                 save_path = os.path.join(args.save_dir, f"model_step_{global_step}.pt")
                 torch.save(agent.state_dict(), save_path)
@@ -290,7 +307,7 @@ if __name__ == "__main__":
         # Bootstrapping (Using next_r_messages for value estimation of terminal state)
         with torch.no_grad():
             next_value = agent.get_value(
-                (next_obs, next_locs, next_r_messages, next_time_steps),
+                (next_obs, next_locs, next_r_messages, next_time_steps, current_event_signal),
                 next_lstm_state,
                 next_done,
             ).reshape(1, -1)
@@ -323,6 +340,8 @@ if __name__ == "__main__":
         b_masks = masks_store.reshape(-1)
         b_spawn_times = spawn_times_store.reshape(-1)
         b_time_steps = time_steps_store.reshape(-1)
+        b_event_targets = event_targets_store.reshape(-1)
+        b_event_inputs = event_inputs_store.reshape(-1)
 
         if args.pred_coef > 0:
             targets_obs = torch.cat((obs[1:], next_obs.unsqueeze(0)), dim=0)
@@ -350,8 +369,12 @@ if __name__ == "__main__":
                 mb_inds = flatinds[:, mbenvinds].ravel()
                 mb_masks = b_masks[mb_inds]
                 mb_spawn_times = b_spawn_times[mb_inds]
-                _, new_action_logprob, action_entropy, _, new_message_logprob, message_entropy, newvalue, mask_logits, time_logits, pred_next_features, _, lstm_output_flat = agent.get_action_and_value(
-                                                    (b_obs[mb_inds], b_locs[mb_inds], b_r_messages[mb_inds], b_time_steps[mb_inds]),
+
+                mb_event_inputs = b_event_inputs[mb_inds]
+                mb_event_targets = b_event_targets[mb_inds]
+
+                _, new_action_logprob, action_entropy, _, new_message_logprob, message_entropy, newvalue, mask_logits, time_logits, pred_next_features, pred_event, _, lstm_output_flat = agent.get_action_and_value(
+                                                    (b_obs[mb_inds], b_locs[mb_inds], b_r_messages[mb_inds], b_time_steps[mb_inds], mb_event_inputs),
                                                     (initial_lstm_state[0][:, mbenvinds], initial_lstm_state[1][:, mbenvinds]),
                                                     b_dones[mb_inds],
                                                     b_actions.long()[mb_inds],
@@ -440,6 +463,13 @@ if __name__ == "__main__":
                         args.num_steps
                     )
 
+                event_loss = pg_loss.new_zeros(())
+                if args.event_coef > 0:
+                    raw_event_loss = nn.functional.cross_entropy(pred_event, mb_event_targets.long(), reduction='none')
+                    masked_event_loss = raw_event_loss * mb_masks.float()
+                    valid_sample_count = mb_masks.float().sum() + 1e-8
+                    event_loss = masked_event_loss.sum() / valid_sample_count
+
                 # Total loss
                 loss = (
                     pg_loss 
@@ -451,6 +481,7 @@ if __name__ == "__main__":
                     + (args.time_coef * time_loss)
                     + (args.pred_coef * prediction_loss)
                     + (args.order_coef * order_loss)
+                    + (args.event_coef * event_loss)
                 )
 
                 optimizer.zero_grad()
@@ -476,6 +507,8 @@ if __name__ == "__main__":
                 writer.add_scalar("losses/prediction_loss", prediction_loss.item(), global_step)
             if args.order_coef > 0:
                 writer.add_scalar("losses/order_loss", order_loss.item(), global_step)
+            if args.event_coef > 0:
+                writer.add_scalar("losses/event_loss", event_loss.item(), global_step)
             writer.add_scalar("charts/SPS", SPS, global_step)
             print(f"SPS: {SPS}")
 
